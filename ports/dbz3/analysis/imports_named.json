@@ -1,0 +1,1108 @@
+[
+ {
+  "lib": "cellGcmSys",
+  "nid": "0x055BD74D",
+  "stub": "0x002B6D80",
+  "name": "cellGcmGetTiledPitchSize"
+ },
+ {
+  "lib": "cellGcmSys",
+  "nid": "0x06EDEA9E",
+  "stub": "0x002B6DA0",
+  "name": "cellGcmSetUserHandler"
+ },
+ {
+  "lib": "cellGcmSys",
+  "nid": "0x0A862772",
+  "stub": "0x002B6DC0",
+  "name": "cellGcmSetQueueHandler"
+ },
+ {
+  "lib": "cellGcmSys",
+  "nid": "0x15BAE46B",
+  "stub": "0x002B6DE0",
+  "name": "_cellGcmInitBody"
+ },
+ {
+  "lib": "cellGcmSys",
+  "nid": "0x21AC3697",
+  "stub": "0x002B6E00",
+  "name": "cellGcmAddressToOffset"
+ },
+ {
+  "lib": "cellGcmSys",
+  "nid": "0x3A33C1FD",
+  "stub": "0x002B6E20",
+  "name": "_cellGcmFunc15"
+ },
+ {
+  "lib": "cellGcmSys",
+  "nid": "0x4524CCCD",
+  "stub": "0x002B6E40",
+  "name": "cellGcmBindTile"
+ },
+ {
+  "lib": "cellGcmSys",
+  "nid": "0x5E2EE0F0",
+  "stub": "0x002B6E60",
+  "name": "cellGcmGetDefaultCommandWordSize"
+ },
+ {
+  "lib": "cellGcmSys",
+  "nid": "0x8CDF8C70",
+  "stub": "0x002B6E80",
+  "name": "cellGcmGetDefaultSegmentWordSize"
+ },
+ {
+  "lib": "cellGcmSys",
+  "nid": "0x9BA451E4",
+  "stub": "0x002B6EA0",
+  "name": "cellGcmSetDefaultFifoSize"
+ },
+ {
+  "lib": "cellGcmSys",
+  "nid": "0x9DC04436",
+  "stub": "0x002B6EC0",
+  "name": "cellGcmBindZcull"
+ },
+ {
+  "lib": "cellGcmSys",
+  "nid": "0xA114EC67",
+  "stub": "0x002B6EE0",
+  "name": "cellGcmMapMainMemory"
+ },
+ {
+  "lib": "cellGcmSys",
+  "nid": "0xA547ADDE",
+  "stub": "0x002B6F00",
+  "name": "cellGcmGetControlRegister"
+ },
+ {
+  "lib": "cellGcmSys",
+  "nid": "0xBD100DBC",
+  "stub": "0x002B6F20",
+  "name": "cellGcmSetTileInfo"
+ },
+ {
+  "lib": "cellGcmSys",
+  "nid": "0xE315A0B2",
+  "stub": "0x002B6F40",
+  "name": "cellGcmGetConfiguration"
+ },
+ {
+  "lib": "cellGcmSys",
+  "nid": "0xF80196C1",
+  "stub": "0x002B6F60",
+  "name": "cellGcmGetLabelAddress"
+ },
+ {
+  "lib": "cellResc",
+  "nid": "0x01220224",
+  "stub": "0x002B6F80",
+  "name": "cellRescGcmSurface2RescSrc"
+ },
+ {
+  "lib": "cellResc",
+  "nid": "0x0D3C22CE",
+  "stub": "0x002B6FA0",
+  "name": "cellRescSetWaitFlip"
+ },
+ {
+  "lib": "cellResc",
+  "nid": "0x10DB5B1A",
+  "stub": "0x002B6FC0",
+  "name": "cellRescSetDsts"
+ },
+ {
+  "lib": "cellResc",
+  "nid": "0x129922A0",
+  "stub": "0x002B6FE0",
+  "name": "cellRescResetFlipStatus"
+ },
+ {
+  "lib": "cellResc",
+  "nid": "0x22AE06D8",
+  "stub": "0x002B7000",
+  "name": "cellRescAdjustAspectRatio"
+ },
+ {
+  "lib": "cellResc",
+  "nid": "0x23134710",
+  "stub": "0x002B7020",
+  "name": "cellRescSetDisplayMode"
+ },
+ {
+  "lib": "cellResc",
+  "nid": "0x25C107E6",
+  "stub": "0x002B7040",
+  "name": "cellRescSetConvertAndFlip"
+ },
+ {
+  "lib": "cellResc",
+  "nid": "0x2EA3061E",
+  "stub": "0x002B7060",
+  "name": "cellRescExit"
+ },
+ {
+  "lib": "cellResc",
+  "nid": "0x516EE89E",
+  "stub": "0x002B7080",
+  "name": "cellRescInit"
+ },
+ {
+  "lib": "cellResc",
+  "nid": "0x5A338CDB",
+  "stub": "0x002B70A0",
+  "name": "cellRescGetBufferSize"
+ },
+ {
+  "lib": "cellResc",
+  "nid": "0x6CD0F95F",
+  "stub": "0x002B70C0",
+  "name": "cellRescSetSrc"
+ },
+ {
+  "lib": "cellResc",
+  "nid": "0x8107277C",
+  "stub": "0x002B70E0",
+  "name": "cellRescSetBufferAddress"
+ },
+ {
+  "lib": "cellResc",
+  "nid": "0xC47C5C22",
+  "stub": "0x002B7100",
+  "name": "cellRescGetFlipStatus"
+ },
+ {
+  "lib": "cellResc",
+  "nid": "0xD1CA0503",
+  "stub": "0x002B7120",
+  "name": "cellRescVideoOutResolutionId2RescBufferMode"
+ },
+ {
+  "lib": "cellResc",
+  "nid": "0xD3758645",
+  "stub": "0x002B7140",
+  "name": "cellRescSetVBlankHandler"
+ },
+ {
+  "lib": "cellSysmodule",
+  "nid": "0x112A5EE9",
+  "stub": "0x002B7160",
+  "name": "cellSysmoduleUnloadModule"
+ },
+ {
+  "lib": "cellSysmodule",
+  "nid": "0x32267A31",
+  "stub": "0x002B7180",
+  "name": "cellSysmoduleLoadModule"
+ },
+ {
+  "lib": "cellSysutil",
+  "nid": "0x0BAE8772",
+  "stub": "0x002B71A0",
+  "name": "cellVideoOutConfigure"
+ },
+ {
+  "lib": "cellSysutil",
+  "nid": "0x189A74DA",
+  "stub": "0x002B71C0",
+  "name": "cellSysutilCheckCallback"
+ },
+ {
+  "lib": "cellSysutil",
+  "nid": "0x20543730",
+  "stub": "0x002B71E0",
+  "name": "cellMsgDialogClose"
+ },
+ {
+  "lib": "cellSysutil",
+  "nid": "0x220894E3",
+  "stub": "0x002B7200",
+  "name": "cellSysutilEnableBgmPlayback"
+ },
+ {
+  "lib": "cellSysutil",
+  "nid": "0x40E895D3",
+  "stub": "0x002B7220",
+  "name": "cellSysutilGetSystemParamInt"
+ },
+ {
+  "lib": "cellSysutil",
+  "nid": "0x4692AB35",
+  "stub": "0x002B7240",
+  "name": "cellAudioOutConfigure"
+ },
+ {
+  "lib": "cellSysutil",
+  "nid": "0x62B0F803",
+  "stub": "0x002B7260",
+  "name": "cellMsgDialogAbort"
+ },
+ {
+  "lib": "cellSysutil",
+  "nid": "0x7603D3DB",
+  "stub": "0x002B7280",
+  "name": "cellMsgDialogOpen2"
+ },
+ {
+  "lib": "cellSysutil",
+  "nid": "0x887572D5",
+  "stub": "0x002B72A0",
+  "name": "cellVideoOutGetState"
+ },
+ {
+  "lib": "cellSysutil",
+  "nid": "0x8B7ED64B",
+  "stub": "0x002B72C0",
+  "name": "cellSaveDataAutoSave2"
+ },
+ {
+  "lib": "cellSysutil",
+  "nid": "0x94862702",
+  "stub": "0x002B72E0",
+  "name": "cellMsgDialogProgressBarInc"
+ },
+ {
+  "lib": "cellSysutil",
+  "nid": "0x9D6AF72A",
+  "stub": "0x002B7300",
+  "name": "cellMsgDialogProgressBarSetMsg"
+ },
+ {
+  "lib": "cellSysutil",
+  "nid": "0x9D98AFA0",
+  "stub": "0x002B7320",
+  "name": "cellSysutilRegisterCallback"
+ },
+ {
+  "lib": "cellSysutil",
+  "nid": "0xA11552F6",
+  "stub": "0x002B7340",
+  "name": "cellSysutilGetBgmPlaybackStatus"
+ },
+ {
+  "lib": "cellSysutil",
+  "nid": "0xC01B4E7C",
+  "stub": "0x002B7360",
+  "name": "cellAudioOutGetSoundAvailability"
+ },
+ {
+  "lib": "cellSysutil",
+  "nid": "0xCED17573",
+  "stub": "0x002B7380",
+  "name": "cellSaveDataFixedDelete"
+ },
+ {
+  "lib": "cellSysutil",
+  "nid": "0xE558748D",
+  "stub": "0x002B73A0",
+  "name": "cellVideoOutGetResolution"
+ },
+ {
+  "lib": "cellSysutil",
+  "nid": "0xE7FA820B",
+  "stub": "0x002B73C0"
+ },
+ {
+  "lib": "cellSysutil",
+  "nid": "0xED5D96AF",
+  "stub": "0x002B73E0",
+  "name": "cellAudioOutGetConfiguration"
+ },
+ {
+  "lib": "cellSysutil",
+  "nid": "0xF4E3CAA0",
+  "stub": "0x002B7400",
+  "name": "cellAudioOutGetState"
+ },
+ {
+  "lib": "cellSysutil",
+  "nid": "0xFBD5C856",
+  "stub": "0x002B7420",
+  "name": "cellSaveDataAutoLoad2"
+ },
+ {
+  "lib": "cellSysutil",
+  "nid": "0xCFDD8E87",
+  "stub": "0x002B7FA0",
+  "name": "cellSysutilDisableBgmPlayback"
+ },
+ {
+  "lib": "cellAudio",
+  "nid": "0x0B168F92",
+  "stub": "0x002B7440",
+  "name": "cellAudioInit"
+ },
+ {
+  "lib": "cellAudio",
+  "nid": "0x377E0CD9",
+  "stub": "0x002B7460",
+  "name": "cellAudioSetNotifyEventQueue"
+ },
+ {
+  "lib": "cellAudio",
+  "nid": "0x4109D08C",
+  "stub": "0x002B7480",
+  "name": "cellAudioGetPortTimestamp"
+ },
+ {
+  "lib": "cellAudio",
+  "nid": "0x4129FE2D",
+  "stub": "0x002B74A0",
+  "name": "cellAudioPortClose"
+ },
+ {
+  "lib": "cellAudio",
+  "nid": "0x5B1E2C73",
+  "stub": "0x002B74C0",
+  "name": "cellAudioPortStop"
+ },
+ {
+  "lib": "cellAudio",
+  "nid": "0x74A66AF0",
+  "stub": "0x002B74E0",
+  "name": "cellAudioGetPortConfig"
+ },
+ {
+  "lib": "cellAudio",
+  "nid": "0x89BE28F2",
+  "stub": "0x002B7500",
+  "name": "cellAudioPortStart"
+ },
+ {
+  "lib": "cellAudio",
+  "nid": "0xCA5AC370",
+  "stub": "0x002B7520",
+  "name": "cellAudioQuit"
+ },
+ {
+  "lib": "cellAudio",
+  "nid": "0xCD7BC431",
+  "stub": "0x002B7540",
+  "name": "cellAudioPortOpen"
+ },
+ {
+  "lib": "cellAudio",
+  "nid": "0xE4046AFE",
+  "stub": "0x002B7560",
+  "name": "cellAudioGetPortBlockTag"
+ },
+ {
+  "lib": "cellAudio",
+  "nid": "0xFF3626FD",
+  "stub": "0x002B7580",
+  "name": "cellAudioRemoveNotifyEventQueue"
+ },
+ {
+  "lib": "cellAtrac",
+  "nid": "0x06DDB53E",
+  "stub": "0x002B75A0"
+ },
+ {
+  "lib": "cellAtrac",
+  "nid": "0x0F9667B6",
+  "stub": "0x002B75C0",
+  "name": "cellAtracGetChannel"
+ },
+ {
+  "lib": "cellAtrac",
+  "nid": "0x2642D4CC",
+  "stub": "0x002B75E0",
+  "name": "cellAtracCreateDecoderExt"
+ },
+ {
+  "lib": "cellAtrac",
+  "nid": "0x2BFFF084",
+  "stub": "0x002B7600"
+ },
+ {
+  "lib": "cellAtrac",
+  "nid": "0x46CFC013",
+  "stub": "0x002B7620"
+ },
+ {
+  "lib": "cellAtrac",
+  "nid": "0x5F62D546",
+  "stub": "0x002B7640",
+  "name": "cellAtracGetMaxSample"
+ },
+ {
+  "lib": "cellAtrac",
+  "nid": "0x66AFC68E",
+  "stub": "0x002B7660",
+  "name": "cellAtracSetDataAndGetMemSize"
+ },
+ {
+  "lib": "cellAtrac",
+  "nid": "0x761CB9BE",
+  "stub": "0x002B7680",
+  "name": "cellAtracDeleteDecoder"
+ },
+ {
+  "lib": "cellAtrac",
+  "nid": "0x7772EB2B",
+  "stub": "0x002B76A0",
+  "name": "cellAtracResetPlayPosition"
+ },
+ {
+  "lib": "cellAtrac",
+  "nid": "0x78BA5C41",
+  "stub": "0x002B76C0",
+  "name": "cellAtracSetLoopNum"
+ },
+ {
+  "lib": "cellAtrac",
+  "nid": "0x8EB0E65F",
+  "stub": "0x002B76E0",
+  "name": "cellAtracDecode"
+ },
+ {
+  "lib": "cellAtrac",
+  "nid": "0x99EFE171",
+  "stub": "0x002B7700"
+ },
+ {
+  "lib": "cellAtrac",
+  "nid": "0x99FB73D1",
+  "stub": "0x002B7720"
+ },
+ {
+  "lib": "cellAtrac",
+  "nid": "0xAB6B6DBF",
+  "stub": "0x002B7740",
+  "name": "cellAtracGetLoopInfo"
+ },
+ {
+  "lib": "cellAtrac",
+  "nid": "0xB5C11938",
+  "stub": "0x002B7760"
+ },
+ {
+  "lib": "cellAtrac",
+  "nid": "0xBE07F05E",
+  "stub": "0x002B7780"
+ },
+ {
+  "lib": "cellAtrac",
+  "nid": "0xC9A95FCB",
+  "stub": "0x002B77A0"
+ },
+ {
+  "lib": "cellSpurs",
+  "nid": "0x07529113",
+  "stub": "0x002B77C0",
+  "name": "cellSpursAttributeSetNamePrefix"
+ },
+ {
+  "lib": "cellSpurs",
+  "nid": "0x1051D134",
+  "stub": "0x002B77E0",
+  "name": "cellSpursAttributeEnableSpuPrintfIfAvailable"
+ },
+ {
+  "lib": "cellSpurs",
+  "nid": "0x16394A4E",
+  "stub": "0x002B7800",
+  "name": "_cellSpursTasksetAttributeInitialize"
+ },
+ {
+  "lib": "cellSpurs",
+  "nid": "0x22AAB31D",
+  "stub": "0x002B7820",
+  "name": "cellSpursEventFlagDetachLv2EventQueue"
+ },
+ {
+  "lib": "cellSpurs",
+  "nid": "0x30AA96C4",
+  "stub": "0x002B7840",
+  "name": "cellSpursInitializeWithAttribute2"
+ },
+ {
+  "lib": "cellSpurs",
+  "nid": "0x373523D4",
+  "stub": "0x002B7860",
+  "name": "cellSpursEventFlagWait"
+ },
+ {
+  "lib": "cellSpurs",
+  "nid": "0x5EF96465",
+  "stub": "0x002B7880",
+  "name": "_cellSpursEventFlagInitialize"
+ },
+ {
+  "lib": "cellSpurs",
+  "nid": "0x652B70E2",
+  "stub": "0x002B78A0",
+  "name": "cellSpursTasksetAttributeSetName"
+ },
+ {
+  "lib": "cellSpurs",
+  "nid": "0x6D2D9339",
+  "stub": "0x002B78C0",
+  "name": "cellSpursEventFlagTryWait"
+ },
+ {
+  "lib": "cellSpurs",
+  "nid": "0x87630976",
+  "stub": "0x002B78E0",
+  "name": "cellSpursEventFlagAttachLv2EventQueue"
+ },
+ {
+  "lib": "cellSpurs",
+  "nid": "0x95180230",
+  "stub": "0x002B7900",
+  "name": "_cellSpursAttributeInitialize"
+ },
+ {
+  "lib": "cellSpurs",
+  "nid": "0x9F72ADD3",
+  "stub": "0x002B7920",
+  "name": "cellSpursJoinTaskset"
+ },
+ {
+  "lib": "cellSpurs",
+  "nid": "0xA789E631",
+  "stub": "0x002B7940",
+  "name": "cellSpursShutdownTaskset"
+ },
+ {
+  "lib": "cellSpurs",
+  "nid": "0xAA6269A8",
+  "stub": "0x002B7960",
+  "name": "cellSpursInitializeWithAttribute"
+ },
+ {
+  "lib": "cellSpurs",
+  "nid": "0xC10931CB",
+  "stub": "0x002B7980",
+  "name": "cellSpursCreateTasksetWithAttribute"
+ },
+ {
+  "lib": "cellSpurs",
+  "nid": "0xCA4C4600",
+  "stub": "0x002B79A0",
+  "name": "cellSpursFinalize"
+ },
+ {
+  "lib": "cellSpurs",
+  "nid": "0x011EE38B",
+  "stub": "0x002B7FC0",
+  "name": "_cellSpursLFQueueInitialize"
+ },
+ {
+  "lib": "cellSpurs",
+  "nid": "0x1656D49F",
+  "stub": "0x002B7FE0",
+  "name": "cellSpursLFQueueAttachLv2EventQueue"
+ },
+ {
+  "lib": "cellSpurs",
+  "nid": "0x1D46FEDF",
+  "stub": "0x002B8000",
+  "name": "cellSpursCreateTaskWithAttribute"
+ },
+ {
+  "lib": "cellSpurs",
+  "nid": "0x73E06F91",
+  "stub": "0x002B8020",
+  "name": "cellSpursLFQueueDetachLv2EventQueue"
+ },
+ {
+  "lib": "cellSpurs",
+  "nid": "0x7FDF4FEF",
+  "stub": "0x002B8040",
+  "name": "cellSpursBarrierInitialize"
+ },
+ {
+  "lib": "cellSpurs",
+  "nid": "0x8A85674D",
+  "stub": "0x002B8060",
+  "name": "_cellSpursLFQueuePushBody"
+ },
+ {
+  "lib": "cellSpurs",
+  "nid": "0x9034E538",
+  "stub": "0x002B8080",
+  "name": "cellSpursTaskGetContextSaveAreaSize"
+ },
+ {
+  "lib": "cellSpurs",
+  "nid": "0xB8474EFF",
+  "stub": "0x002B80A0",
+  "name": "_cellSpursTaskAttributeInitialize"
+ },
+ {
+  "lib": "cellSpurs",
+  "nid": "0xBEB600AC",
+  "stub": "0x002B80C0",
+  "name": "cellSpursCreateTask"
+ },
+ {
+  "lib": "cellSpurs",
+  "nid": "0xE0A6DBE4",
+  "stub": "0x002B80E0",
+  "name": "_cellSpursSendSignal"
+ },
+ {
+  "lib": "libgem",
+  "nid": "0x13EA7C64",
+  "stub": "0x002B79C0",
+  "name": "cellGemInit"
+ },
+ {
+  "lib": "libgem",
+  "nid": "0xE1F85A80",
+  "stub": "0x002B79E0",
+  "name": "cellGemEnd"
+ },
+ {
+  "lib": "sceNp",
+  "nid": "0xAD218FAF",
+  "stub": "0x002B7A00",
+  "name": "sceNpDrmIsAvailable"
+ },
+ {
+  "lib": "sceNpTrophy",
+  "nid": "0x1197B52C",
+  "stub": "0x002B7A20",
+  "name": "sceNpTrophyRegisterContext"
+ },
+ {
+  "lib": "sceNpTrophy",
+  "nid": "0x1C25470D",
+  "stub": "0x002B7A40",
+  "name": "sceNpTrophyCreateHandle"
+ },
+ {
+  "lib": "sceNpTrophy",
+  "nid": "0x27DEDA93",
+  "stub": "0x002B7A60"
+ },
+ {
+  "lib": "sceNpTrophy",
+  "nid": "0x370136FE",
+  "stub": "0x002B7A80",
+  "name": "sceNpTrophyGetRequiredDiskSpace"
+ },
+ {
+  "lib": "sceNpTrophy",
+  "nid": "0x3741ECC7",
+  "stub": "0x002B7AA0",
+  "name": "sceNpTrophyDestroyContext"
+ },
+ {
+  "lib": "sceNpTrophy",
+  "nid": "0x39567781",
+  "stub": "0x002B7AC0",
+  "name": "sceNpTrophyInit"
+ },
+ {
+  "lib": "sceNpTrophy",
+  "nid": "0x48BD97C7",
+  "stub": "0x002B7AE0",
+  "name": "sceNpTrophyAbortHandle"
+ },
+ {
+  "lib": "sceNpTrophy",
+  "nid": "0x623CD2DC",
+  "stub": "0x002B7B00",
+  "name": "sceNpTrophyDestroyHandle"
+ },
+ {
+  "lib": "sceNpTrophy",
+  "nid": "0x8CEEDD21",
+  "stub": "0x002B7B20",
+  "name": "sceNpTrophyUnlockTrophy"
+ },
+ {
+  "lib": "sceNpTrophy",
+  "nid": "0xA7FABF4D",
+  "stub": "0x002B7B40",
+  "name": "sceNpTrophyTerm"
+ },
+ {
+  "lib": "sceNpTrophy",
+  "nid": "0xB3AC3478",
+  "stub": "0x002B7B60",
+  "name": "sceNpTrophyGetTrophyUnlockState"
+ },
+ {
+  "lib": "sceNpTrophy",
+  "nid": "0xE3BF9A28",
+  "stub": "0x002B7B80",
+  "name": "sceNpTrophyCreateContext"
+ },
+ {
+  "lib": "sceNpTrophy",
+  "nid": "0xFCE6D30A",
+  "stub": "0x002B7BA0",
+  "name": "sceNpTrophyGetTrophyInfo"
+ },
+ {
+  "lib": "cellGame",
+  "nid": "0x70ACEC67",
+  "stub": "0x002B7BC0",
+  "name": "cellGameContentPermit"
+ },
+ {
+  "lib": "cellGame",
+  "nid": "0xB0A1F8C6",
+  "stub": "0x002B7BE0",
+  "name": "cellGameContentErrorDialog"
+ },
+ {
+  "lib": "cellGame",
+  "nid": "0xDB9819F3",
+  "stub": "0x002B7C00",
+  "name": "cellGameDataCheck"
+ },
+ {
+  "lib": "cellGame",
+  "nid": "0xF52639EA",
+  "stub": "0x002B7C20",
+  "name": "cellGameBootCheck"
+ },
+ {
+  "lib": "cellSaveData",
+  "nid": "0x27CB8BC2",
+  "stub": "0x002B7C40",
+  "name": "cellSaveDataListDelete"
+ },
+ {
+  "lib": "sys_io",
+  "nid": "0x0D5F2C14",
+  "stub": "0x002B7C60",
+  "name": "cellPadClearBuf"
+ },
+ {
+  "lib": "sys_io",
+  "nid": "0x1CF98800",
+  "stub": "0x002B7C80",
+  "name": "cellPadInit"
+ },
+ {
+  "lib": "sys_io",
+  "nid": "0x2F1774D5",
+  "stub": "0x002B7CA0",
+  "name": "cellKbGetInfo"
+ },
+ {
+  "lib": "sys_io",
+  "nid": "0x433F6EC0",
+  "stub": "0x002B7CC0",
+  "name": "cellKbInit"
+ },
+ {
+  "lib": "sys_io",
+  "nid": "0x4CC9B68D",
+  "stub": "0x002B7CE0",
+  "name": "cellPadPeriphGetInfo"
+ },
+ {
+  "lib": "sys_io",
+  "nid": "0x4D9B75D5",
+  "stub": "0x002B7D00",
+  "name": "cellPadEnd"
+ },
+ {
+  "lib": "sys_io",
+  "nid": "0x578E3C98",
+  "stub": "0x002B7D20",
+  "name": "cellPadSetPortSetting"
+ },
+ {
+  "lib": "sys_io",
+  "nid": "0x8B72CDA1",
+  "stub": "0x002B7D40",
+  "name": "cellPadGetData"
+ },
+ {
+  "lib": "sys_io",
+  "nid": "0xA5F85E4D",
+  "stub": "0x002B7D60",
+  "name": "cellKbSetCodeType"
+ },
+ {
+  "lib": "sys_io",
+  "nid": "0xA703A51D",
+  "stub": "0x002B7D80",
+  "name": "cellPadGetInfo2"
+ },
+ {
+  "lib": "sys_io",
+  "nid": "0xDEEFDFA7",
+  "stub": "0x002B7DA0",
+  "name": "cellKbSetReadMode"
+ },
+ {
+  "lib": "sys_io",
+  "nid": "0xF65544EE",
+  "stub": "0x002B7DC0",
+  "name": "cellPadSetActDirect"
+ },
+ {
+  "lib": "sys_io",
+  "nid": "0xFF0A21B7",
+  "stub": "0x002B7DE0",
+  "name": "cellKbRead"
+ },
+ {
+  "lib": "sys_fs",
+  "nid": "0x2CB51F0D",
+  "stub": "0x002B7E00",
+  "name": "cellFsClose"
+ },
+ {
+  "lib": "sys_fs",
+  "nid": "0x3F61245C",
+  "stub": "0x002B7E20",
+  "name": "cellFsOpendir"
+ },
+ {
+  "lib": "sys_fs",
+  "nid": "0x4D5FF8E2",
+  "stub": "0x002B7E40",
+  "name": "cellFsRead"
+ },
+ {
+  "lib": "sys_fs",
+  "nid": "0x5C74903D",
+  "stub": "0x002B7E60",
+  "name": "cellFsReaddir"
+ },
+ {
+  "lib": "sys_fs",
+  "nid": "0x718BF5F8",
+  "stub": "0x002B7E80",
+  "name": "cellFsOpen"
+ },
+ {
+  "lib": "sys_fs",
+  "nid": "0x7DE6DCED",
+  "stub": "0x002B7EA0",
+  "name": "cellFsStat"
+ },
+ {
+  "lib": "sys_fs",
+  "nid": "0x7F4677A8",
+  "stub": "0x002B7EC0",
+  "name": "cellFsUnlink"
+ },
+ {
+  "lib": "sys_fs",
+  "nid": "0xA397D042",
+  "stub": "0x002B7EE0",
+  "name": "cellFsLseek"
+ },
+ {
+  "lib": "sys_fs",
+  "nid": "0xB1840B53",
+  "stub": "0x002B7F00",
+  "name": "cellFsSdataOpen"
+ },
+ {
+  "lib": "sys_fs",
+  "nid": "0xECDCF2AB",
+  "stub": "0x002B7F20",
+  "name": "cellFsWrite"
+ },
+ {
+  "lib": "sys_fs",
+  "nid": "0xEF3EFA34",
+  "stub": "0x002B7F40",
+  "name": "cellFsFstat"
+ },
+ {
+  "lib": "sys_fs",
+  "nid": "0xF12EECC8",
+  "stub": "0x002B7F60",
+  "name": "cellFsRename"
+ },
+ {
+  "lib": "sys_fs",
+  "nid": "0xFF42DCC3",
+  "stub": "0x002B7F80",
+  "name": "cellFsClosedir"
+ },
+ {
+  "lib": "cellSync",
+  "nid": "0x07254FDA",
+  "stub": "0x002B8100",
+  "name": "cellSyncBarrierInitialize"
+ },
+ {
+  "lib": "cellSync",
+  "nid": "0x6C272124",
+  "stub": "0x002B8120",
+  "name": "cellSyncBarrierTryWait"
+ },
+ {
+  "lib": "cellSync",
+  "nid": "0x91F2B7B0",
+  "stub": "0x002B8140",
+  "name": "cellSyncMutexUnlock"
+ },
+ {
+  "lib": "cellSync",
+  "nid": "0xA9072DEE",
+  "stub": "0x002B8160",
+  "name": "cellSyncMutexInitialize"
+ },
+ {
+  "lib": "cellSync",
+  "nid": "0xD06918C4",
+  "stub": "0x002B8180",
+  "name": "cellSyncMutexTryLock"
+ },
+ {
+  "lib": "sysPrxForUser",
+  "nid": "0x1573DC3F",
+  "stub": "0x002B81A0",
+  "name": "sys_lwmutex_lock"
+ },
+ {
+  "lib": "sysPrxForUser",
+  "nid": "0x1BC200F4",
+  "stub": "0x002B81C0",
+  "name": "sys_lwmutex_unlock"
+ },
+ {
+  "lib": "sysPrxForUser",
+  "nid": "0x24A1EA07",
+  "stub": "0x002B81E0",
+  "name": "sys_ppu_thread_create"
+ },
+ {
+  "lib": "sysPrxForUser",
+  "nid": "0x2C847572",
+  "stub": "0x002B8200",
+  "name": "_sys_process_atexitspawn"
+ },
+ {
+  "lib": "sysPrxForUser",
+  "nid": "0x2F85C0EF",
+  "stub": "0x002B8220",
+  "name": "sys_lwmutex_create"
+ },
+ {
+  "lib": "sysPrxForUser",
+  "nid": "0x350D454E",
+  "stub": "0x002B8240",
+  "name": "sys_ppu_thread_get_id"
+ },
+ {
+  "lib": "sysPrxForUser",
+  "nid": "0x35168520",
+  "stub": "0x002B8260",
+  "name": "_sys_heap_malloc"
+ },
+ {
+  "lib": "sysPrxForUser",
+  "nid": "0x42B23552",
+  "stub": "0x002B8280",
+  "name": "sys_prx_register_library"
+ },
+ {
+  "lib": "sysPrxForUser",
+  "nid": "0x44265C08",
+  "stub": "0x002B82A0",
+  "name": "_sys_heap_memalign"
+ },
+ {
+  "lib": "sysPrxForUser",
+  "nid": "0x45FE2FCE",
+  "stub": "0x002B82C0",
+  "name": "_sys_spu_printf_initialize"
+ },
+ {
+  "lib": "sysPrxForUser",
+  "nid": "0x744680A2",
+  "stub": "0x002B82E0",
+  "name": "sys_initialize_tls"
+ },
+ {
+  "lib": "sysPrxForUser",
+  "nid": "0x8461E528",
+  "stub": "0x002B8300",
+  "name": "sys_time_get_system_time"
+ },
+ {
+  "lib": "sysPrxForUser",
+  "nid": "0x8A561D92",
+  "stub": "0x002B8320",
+  "name": "_sys_heap_free"
+ },
+ {
+  "lib": "sysPrxForUser",
+  "nid": "0x96328741",
+  "stub": "0x002B8340",
+  "name": "_sys_process_at_Exitspawn"
+ },
+ {
+  "lib": "sysPrxForUser",
+  "nid": "0xA2C7BA64",
+  "stub": "0x002B8360",
+  "name": "sys_prx_exitspawn_with_level"
+ },
+ {
+  "lib": "sysPrxForUser",
+  "nid": "0xA3E3BE68",
+  "stub": "0x002B8380",
+  "name": "sys_ppu_thread_once"
+ },
+ {
+  "lib": "sysPrxForUser",
+  "nid": "0xAEB78725",
+  "stub": "0x002B83A0",
+  "name": "sys_lwmutex_trylock"
+ },
+ {
+  "lib": "sysPrxForUser",
+  "nid": "0xAEDE4B03",
+  "stub": "0x002B83C0",
+  "name": "_sys_heap_delete_heap"
+ },
+ {
+  "lib": "sysPrxForUser",
+  "nid": "0xAFF080A4",
+  "stub": "0x002B83E0",
+  "name": "sys_ppu_thread_exit"
+ },
+ {
+  "lib": "sysPrxForUser",
+  "nid": "0xB2FCF2C8",
+  "stub": "0x002B8400",
+  "name": "_sys_heap_create_heap"
+ },
+ {
+  "lib": "sysPrxForUser",
+  "nid": "0xC3476D0C",
+  "stub": "0x002B8420",
+  "name": "sys_lwmutex_destroy"
+ },
+ {
+  "lib": "sysPrxForUser",
+  "nid": "0xDD3B27AC",
+  "stub": "0x002B8440",
+  "name": "_sys_spu_printf_finalize"
+ },
+ {
+  "lib": "sysPrxForUser",
+  "nid": "0xE0DA8EFD",
+  "stub": "0x002B8460",
+  "name": "sys_spu_image_close"
+ },
+ {
+  "lib": "sysPrxForUser",
+  "nid": "0xE6F2C1E7",
+  "stub": "0x002B8480",
+  "name": "sys_process_exit"
+ },
+ {
+  "lib": "sysPrxForUser",
+  "nid": "0xEBE5F72F",
+  "stub": "0x002B84A0",
+  "name": "sys_spu_image_import"
+ }
+]
