@@ -106,6 +106,8 @@ struct Window {
     uint64_t extra_us, extra_max_us, extra_tasks;
     uint64_t gated_load, gated_list, aborted;   /* extra steps not run */
     uint64_t rd_runs, rd_rolled, rd_kb, rd_noroom, rd_flushed, rd_wrapped;  /* T44 */
+    uint64_t du_phase_runs[2][3], du_phase_us[2][3], du_phase_gcm[2][3];
+    uint64_t du_render_skipped;
 };
 
 Window g_w;
@@ -171,6 +173,19 @@ void flush(uint64_t now)
                 (unsigned long long)g_w.rd_runs, (unsigned long long)g_w.rd_rolled,
                 (unsigned long long)g_w.rd_kb, (unsigned long long)g_w.rd_noroom,
                 (unsigned long long)g_w.rd_flushed, (unsigned long long)g_w.rd_wrapped);
+        for (int pass = 0; pass < 2; ++pass) {
+            fprintf(g_log, "  du-phase pass=%s", pass ? "extra" : "regular");
+            for (int phase = 0; phase < 3; ++phase) {
+                const uint64_t runs = g_w.du_phase_runs[pass][phase];
+                fprintf(g_log, " p%d=%llu/%.0fus/%.1fkb", phase,
+                        (unsigned long long)runs,
+                        runs ? (double)g_w.du_phase_us[pass][phase] / (double)runs : 0.0,
+                        runs ? (double)g_w.du_phase_gcm[pass][phase] / 1024.0 / (double)runs : 0.0);
+            }
+            fputc('\n', g_log);
+        }
+        fprintf(g_log, "  du-render-skipped=%llu\n",
+                (unsigned long long)g_w.du_render_skipped);
         fprintf(g_log, "  tasks passes=%llu\n", (unsigned long long)g_w.task_passes);
         for (int i = 0; i < kMaxTasks && g_w.tasks[i].fn; ++i) {
             const TaskStat& t = g_w.tasks[i];
@@ -231,6 +246,41 @@ uint32_t gcm_written(uint32_t before, uint32_t after)
     const uint32_t begin = vm_read32(kTitleGcmCtx + 0u);
     const uint32_t end = vm_read32(kTitleGcmCtx + 4u);
     return (end - before) + (after - begin);     /* wrapped once */
+}
+
+/* A diagnostic only: identify which part of the mixed DU task prepares GCM
+ * commands. The compiler rewrites only func_001DBC58 to call this at entry,
+ * the common tail, after its first tail block, and before return. No guest
+ * registers or memory are changed. Phase 0 spans entry -> loc_001DE4F4,
+ * phase 1 spans that label -> the call at 001DE598, phase 2 -> return. */
+uint64_t g_du_phase_tick = 0;
+uint32_t g_du_phase_gcm = 0;
+int g_du_phase_expected = 0;
+
+extern "C" void dbz3_du_phase_probe(uint32_t phase)
+{
+    if (g_dbz3_cur_task_fn != 0x001DBC58u ||
+        (g_dbz3_cur_pass != 1 && g_dbz3_cur_pass != 2)) return;
+    const uint64_t tick = lp_ticks();
+    const uint32_t gcm = gcm_current();
+    if (phase == 0) {
+        g_du_phase_tick = tick;
+        g_du_phase_gcm = gcm;
+        g_du_phase_expected = 1;
+        return;
+    }
+    if ((int)phase != g_du_phase_expected || phase > 3) {
+        g_du_phase_expected = 0;
+        return;
+    }
+    const int pass = g_dbz3_cur_pass - 1;
+    const int bucket = (int)phase - 1;
+    g_w.du_phase_runs[pass][bucket]++;
+    g_w.du_phase_us[pass][bucket] += lp_us(tick - g_du_phase_tick);
+    g_w.du_phase_gcm[pass][bucket] += gcm_written(g_du_phase_gcm, gcm);
+    g_du_phase_tick = tick;
+    g_du_phase_gcm = gcm;
+    g_du_phase_expected++;
 }
 
 /* Task classes for the 60 Hz logic step: a task function that has ever moved
@@ -603,7 +653,6 @@ constexpr uint32_t kTaskSentinel = 0x0047BCB8u;
 
 /* Returns 0 when it stopped early or changed the task list (no more steps
  * this frame). */
-extern "C" int g_pad_freeze;   /* cellPad.c */
 extern "C" uint32_t ppu_hle_inject_base;   /* vm.h: GCM control at +0x2000 */
 
 /* T44: draw tasks that also hold game logic, run again in the extra step with
@@ -619,6 +668,28 @@ extern "C" uint32_t ppu_hle_inject_base;   /* vm.h: GCM control at +0x2000 */
 constexpr uint32_t kRepeatDraw[] = { 0x001DBC58u };
 constexpr uint32_t kRdRoom = 0x60000u;
 bool g_repeat_draw_unsafe = false;
+
+/* run08: entry -> loc_001DE4F4 takes about 0.45 ms and writes zero GCM bytes.
+ * The rest takes 15-22 ms and emits all observed GCM output. Keep the update
+ * part on extra 60 Hz steps; render the common tail on regular passes only.
+ * The SD marker restores the original full extra pass for A/B comparisons. */
+int du_update_only_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        FILE* f = fopen("sdmc:/switch/dbz-budokai-3-switch/du-full-extra", "r");
+        enabled = f ? 0 : 1;
+        if (f) fclose(f);
+    }
+    return enabled;
+}
+
+extern "C" int dbz3_du_skip_render(void)
+{
+    if (g_dbz3_cur_pass != 2 || !du_update_only_enabled()) return 0;
+    g_w.du_render_skipped++;
+    return 1;
+}
 
 int repeat_draw(uint32_t fn)
 {
@@ -650,23 +721,12 @@ int extra_logic_step(ppu_context* ctx)
     vm_write64(ctx->gpr[1] + -0xA0, ctx->gpr[1]); ctx->gpr[1] += -0xA0;
     vm_write64(ctx->gpr[1] + 0x28, ctx->gpr[2]);
 
-    /* T42 input: the extra step re-reads the pad with the host input frozen
-     * (cellPad.c g_pad_freeze), so it sees the same buttons as the regular
-     * pass and no new press. Before, a press first read here was handled
-     * only by the logic tasks of this step and was already a "held" button
-     * by the next regular pass: menus, character select and the pause menu
-     * (draw tasks) missed it about one time in two at 30 FPS.
-     * sdmc:/switch/dbz-budokai-3-switch/pad-repoll restores the old live re-read. */
-    static int repoll = -1;
-    if (repoll < 0) {
-        FILE* f = fopen("sdmc:/switch/dbz-budokai-3-switch/pad-repoll", "r");
-        repoll = f ? 1 : 0;
-        if (f) fclose(f);
-    }
+    /* Read live input on every logic step. Replaying a frozen snapshot caused
+     * missed/delayed controls on Switch; the pad-repoll trial resolved them.
+     * This is now unconditional and needs no SD marker. The logic60 scheduler
+     * still controls timing, while cellPad retains its normal report policy. */
     ctx->lr = 0x0015A25Cu;            /* as from main; the wrapper times it */
-    g_pad_freeze = !repoll;
     real_func_00024588(ctx); DRAIN_TRAMPOLINE(ctx);
-    g_pad_freeze = 0;
     pad_rec_trace(2);
     heap_check("extra pad poll", 0x00024588u, 0, 2);
     ctx->gpr[2] = vm_read64(ctx->gpr[1] + 0x28);
@@ -688,7 +748,7 @@ int extra_logic_step(ppu_context* ctx)
                 rd_end0 = vm_read32(kTitleGcmCtx + 4u);
                 rd_cur0 = gcm_current();
                 if (rd_begin0 > rd_cur0 || rd_end0 < rd_cur0 ||
-                    rd_end0 - rd_cur0 < kRdRoom) {
+                    (!du_update_only_enabled() && rd_end0 - rd_cur0 < kRdRoom)) {
                     g_w.rd_noroom++;
                     task = vm_read32(task + 0x28u);
                     continue;

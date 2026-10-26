@@ -70,6 +70,10 @@ list(LENGTH RECOMP_SOURCES RECOMP_SOURCE_COUNT)
 #   T38 PORT_SWITCH_PPU_FUNC_PROFILE  diagnostic: every function stamps itself
 #       as the main thread's current function (scripts/ppu_instrument.py)
 option(PORT_SWITCH_PPU_FUNC_PROFILE "Instrument lifted PPU functions for the Switch sampler" OFF)
+if(PORT_SWITCH_PPU_FUNC_PROFILE)
+    set_property(SOURCE main.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+        PORT_SWITCH_PPU_FUNC_PROFILE=1)
+endif()
 option(PORT_SWITCH_PPU_VECNEON "Rewrite lifted AltiVec blocks as NEON (Switch)" ON)
 #   T40 PORT_SWITCH_PPU_LIFTFAST  fewer trampoline drains + cheaper guest memory
 #       accessors (scripts/ppu_liftfast.py, dbz3_liftfast.h)

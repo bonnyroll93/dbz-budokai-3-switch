@@ -25,6 +25,7 @@
 #if defined(PPU_FAST_VM) && defined(__SWITCH__)
 #include <stdint.h>
 #include <string.h>
+#include <stdlib.h>
 
 #define LF_HIDDEN __attribute__((visibility("hidden")))
 #define LF_INLINE static inline
@@ -137,6 +138,116 @@ LF_INLINE void lf_write64(uint64_t ea, uint64_t v)
 #define vm_write16(a, v) lf_write16((a), (v))
 #define vm_write32(a, v) lf_write32((a), (v))
 #define vm_write64(a, v) lf_write64((a), (v))
+
+/* Reproduce selection-sort swaps in O(n log n). A stable sort is NOT
+ * equivalent: the original swaps can reorder equal-depth objects. Each tree
+ * node selects the greatest key, breaking ties by current list position.
+ * Restrict keys to the exactly representable integer range: truncating then
+ * storing them as floats must not change subsequent comparisons. Unusual
+ * inputs fall back before any guest writes. Scratch is per invocation. */
+LF_INLINE bool dbz3_sort_draw_list()
+{
+    const uint32_t count = vm_read32(0x484800);
+    if (count < 32 || count > 16384) return false;
+    const uint32_t base = vm_read32(0x484804);
+    if ((base & 3) || base > UINT32_MAX - count * 8 ||
+        !lf_plain(base) || !lf_plain(base + count * 8 - 1)) return false;
+    uint32_t leaves = 1;
+    while (leaves < count) leaves <<= 1;
+    uint32_t* tree = (uint32_t*)malloc((2 * leaves + count) * sizeof(uint32_t));
+    if (!tree) return false;
+    int32_t* keys = (int32_t*)(tree + 2 * leaves);
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint32_t bits = vm_read32(base + i * 8 + 4);
+        float key;
+        memcpy(&key, &bits, 4);
+        if (!(key >= -16777216.0f && key <= 16777216.0f)) {
+            free(tree);
+            return false;
+        }
+        keys[i] = (int32_t)key;
+    }
+    const auto winner = [keys](uint32_t a, uint32_t b) -> uint32_t {
+        if (a == UINT32_MAX) return b;
+        if (b == UINT32_MAX) return a;
+        if (keys[a] != keys[b]) return keys[a] > keys[b] ? a : b;
+        return a < b ? a : b;
+    };
+    for (uint32_t i = 0; i < leaves; ++i)
+        tree[leaves + i] = i < count ? i : UINT32_MAX;
+    for (uint32_t i = leaves - 1; i; --i)
+        tree[i] = winner(tree[i * 2], tree[i * 2 + 1]);
+    const auto update = [&](uint32_t index, uint32_t value) {
+        uint32_t node = leaves + index;
+        tree[node] = value;
+        while ((node >>= 1) != 0)
+            tree[node] = winner(tree[node * 2], tree[node * 2 + 1]);
+    };
+    for (uint32_t head = 0; head + 1 < count; ++head) {
+        const uint32_t best = tree[1];
+        const uint32_t head_addr = base + head * 8;
+        const uint32_t best_addr = base + best * 8;
+        const uint32_t object = vm_read32(head_addr);
+        const uint32_t selected = vm_read32(best_addr);
+        const float head_key = (float)keys[head];
+        const float best_key = (float)keys[best];
+        uint32_t head_bits, best_bits;
+        memcpy(&head_bits, &head_key, 4);
+        memcpy(&best_bits, &best_key, 4);
+        vm_write32(head_addr + 4, best_bits);
+        vm_write32(head_addr, selected);
+        vm_write32(best_addr + 4, head_bits);
+        vm_write32(best_addr, object);
+        keys[best] = keys[head];
+        update(head, UINT32_MAX);
+        if (best != head) update(best, best);
+    }
+    free(tree);
+    return true;
+}
+
+/* func_0005AD60's inner selection-sort scan. The lifted loop loads and
+ * converts four vector lanes for each candidate, but compares only the first
+ * lane (record+4). The outer loop still performs the original record swaps. */
+static inline uint32_t ppu_f2i32(double v, int rn);
+LF_INLINE void dbz3_sort_scan(ppu_context* ctx)
+{
+    uint32_t remaining = ctx->ctr;
+    uint32_t cursor = (uint32_t)ctx->gpr[8];
+    int32_t best = (int32_t)ctx->gpr[9];
+    uint32_t best_addr = (uint32_t)ctx->gpr[11];
+    uint32_t best_lane;
+    memcpy(&best_lane, &ctx->vr[3], sizeof(best_lane));
+    int32_t candidate = 0;
+
+    while (remaining--) {
+        const uint32_t bits = vm_read32((uint64_t)cursor + 4);
+        float key;
+        memcpy(&key, &bits, sizeof(key));
+        candidate = (int32_t)ppu_f2i32((double)key, 0);
+        if (best < candidate) {
+            best = candidate;
+            best_addr = cursor;
+            const float clamped = key;
+            const int32_t lane = (clamped != clamped) ? 0 :
+                (clamped >= 2147483647.0f) ? 2147483647 :
+                (clamped <= -2147483648.0f) ? (-2147483647 - 1) :
+                (int32_t)clamped;
+            best_lane = __builtin_bswap32((uint32_t)lane);
+        }
+        cursor += 8;
+    }
+
+    for (int i = 0; i < 4; ++i) {
+        memcpy((uint8_t*)&ctx->vr[4] + i * 4, &best_lane, 4);
+        memcpy((uint8_t*)&ctx->vr[3] + i * 4, &best_lane, 4);
+    }
+    ctx->gpr[11] = best_addr;
+    ctx->gpr[9] = (uint32_t)best;
+    ctx->gpr[7] = (uint32_t)candidate;
+    ctx->gpr[8] = cursor;
+    ctx->ctr = 0;
+}
 
 #endif /* PPU_FAST_VM && __SWITCH__ */
 #endif /* DBZ3_LIFTFAST_H */

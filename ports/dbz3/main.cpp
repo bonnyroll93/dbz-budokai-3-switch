@@ -727,7 +727,11 @@ int main(int argc, char** argv)
         fprintf(stderr, "[diag] verbose diagnostics %s (diag.on %s)\n",
                 ps3_diag_enabled ? "ON" : "OFF", ps3_diag_enabled ? "found" : "absent");
     }
+    #ifdef PORT_SWITCH_PPU_FUNC_PROFILE
+    if (true)
+    #else
     if (ps3_diag_enabled)
+    #endif
         fprintf(stderr, "[t23] PPU hot-address sampler %s\n",
                 ps3_ppu_hot_profile_start() ? "enabled" : "unavailable");
 #ifdef BUDOKAI_SPU_PROFILE
