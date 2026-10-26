@@ -12,6 +12,22 @@ Raggiungere e mantenere 30 FPS stabili nelle seguenti situazioni:
 
 L'obiettivo è raggiunto quando il gioco mantiene 30 FPS nelle tre situazioni indicate durante sessioni ripetute, senza cali persistenti o blocchi dell'immagine.
 
+## Esito dell'ultima build e ritorno alla base (26 ottobre 2026)
+
+I log della Switch sono stati raccolti in `build/logs/dbz3/dev/run10`. La build `fps-three-scenes` attivava insieme tre modifiche: record da 64 bit nell'ordinamento della schermata livello, trasformazione nativa `func_0001F1E8` nella mappa e tabella per cercare le pipeline grafiche. Dopo il calo percepito, tutte e tre sono state annullate; `run10` resta conservato per il confronto.
+
+Il ritmo medio di presentazione dell'intera sessione è 36,1/s in `run10` contro 40,1/s in `run09`, ma le sessioni coprono scene e durate diverse: questi valori non isolano la causa del calo. Nelle finestre della mappa, il task `0x001DBC58` richiede circa 17–20 ms per passata regolare in `run10` e 17–23 ms in `run09`; in entrambi i casi le finestre sostenute restano intorno a 23–30 passaggi/s. La schermata livello resta il problema maggiore: nell'ultima finestra di `run10`, il task `0x001D1604` richiede 56,6 ms per passaggio e il ciclo ne completa 67 in 5,02 s. `t23-draw-prof.log` registra 70.943 draw in 5,019 s, circa 834 per frame registrato. Nei picchi finali di `t29-spikes.log` non risultano attese GPU, upload, readback o nuove pipeline.
+
+La build di riferimento dopo il revert è stata compilata e pacchettizzata come `build/dev/dbz3/Dragonball-Z-Budokai-3-dev.nsp` (`road30-revert-baseline`), senza campionatore PPU. È stata provata sulla Switch in `run11`. Riprendere con una sola modifica per build e misurare separatamente duello, mappa e schermata livello nelle stesse condizioni. Per la schermata livello, il profilo `run10/t23-ppu-hot.log` attribuisce 571 campioni su 3893 del task a `func_00030790`: esaminare le sue chiamate e i draw prodotti prima di ridurre lavoro ripetuto. La funzione è una pista, non una causa dimostrata del tempo totale.
+
+### Prova della base ripristinata: `run11`
+
+L'utente riferisce che la build ripristinata funziona decisamente meglio. I nuovi log sono in `build/logs/dbz3/dev/run11`. Il file `t23-ppu-hot.log` è identico byte per byte a quello di `run10`: è rimasto sulla SD dalla build precedente e non è un profilo di `run11`.
+
+La media dell'intera sessione è 37,1 presentazioni/s contro 36,1 in `run10`; le durate e le scene non coincidono, quindi la differenza aggregata non misura il guadagno della build. Nelle nove finestre sostenute della mappa DU, il ciclo completa circa 22,7–29,7 passaggi/s e il task `0x001DBC58` richiede circa 17,1–21,5 ms per passata regolare. La schermata livello parte ancora con 30 presentazioni in 1,8–2,2 s e il task `0x001D1604` arriva a 58,4 ms per passaggio; le finestre successive risalgono, ma non dimostrano 30 FPS stabili per tutta la schermata. Durante l'ingresso nella schermata, `t23-draw-prof.log` registra 72.273–78.162 draw in circa cinque secondi, circa 900 per frame registrato.
+
+Mantenere questa build come riferimento. Il prossimo intervento deve misurare quali draw della schermata livello sono ripetuti e quanto costa `func_00030790`, poi modificare un solo percorso e confrontarlo con `run11` nella stessa schermata. Non attribuire al file PPU rimasto sulla SD alcuna misura della build ripristinata.
+
 ## Diagnosi: schermata esperienza e livello
 
 Per la mappa, la raccolta `run07` individua un problema distinto: il task misto logica/disegno `0x001DBC58` viene ripetuto nei passi extra e poi i suoi comandi grafici sono scartati. Il lavoro CPU rimane: circa 17–21 ms nella passata regolare, più 15–43 ms complessivi di passi extra per immagine nelle finestre analizzate. Priorità: separare aggiornamento e disegno mantenendo il tempo reale. Misure, shader importati e verifiche successive in [DRAGON_UNIVERSE_RUN07.md](DRAGON_UNIVERSE_RUN07.md).
