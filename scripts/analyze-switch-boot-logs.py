@@ -27,21 +27,193 @@ def records(text, required):
             continue
 
 
+def describe_rates(values, threshold=None):
+    if not values:
+        return None
+    result = {
+        "count": len(values),
+        "min": round(min(values), 3),
+        "max": round(max(values), 3),
+        "mean": round(sum(values) / len(values), 3),
+    }
+    if threshold is not None:
+        result[f"windows_below_{threshold:g}"] = sum(value < threshold for value in values)
+    return result
+
+
 def analyze(folder):
     stderr = read(folder, "t19-stderr.log")
     marker = re.search(r"\[t19-build\] ([^\r\n]+)", stderr)
+    compiled = re.search(r"\[build\] compiled ([^\r\n]+)", stderr)
+    ppu_sampler = re.search(r"\[t23\] PPU hot-address sampler (enabled|unavailable)", stderr)
+    ppu_hot_path = folder / "t23-ppu-hot.log"
+    ppu_hot_bytes = ppu_hot_path.stat().st_size if ppu_hot_path.is_file() else 0
     clocks = list(records(read(folder, "t21-clock.log"), ("frames", "delta", "wall_ms")))
     total_ms = sum(row["wall_ms"] for row in clocks)
     first = clocks[:7]
     result = {
         "directory": str(folder),
         "build": marker.group(1) if marker else None,
+        "compiled_at": compiled.group(1) if compiled else None,
         "neon_selftest_pass": "SPU shufb NEON self-test PASS" in stderr,
         "function_profiler_enabled": "SPU function profiler enabled" in stderr,
+        "ppu_sampler_status": ppu_sampler.group(1) if ppu_sampler else "not_started_or_unreported",
+        "ppu_hot_log_bytes": ppu_hot_bytes,
+        "ppu_hot_log_freshness": (
+            "current_run" if ppu_sampler and ppu_sampler.group(1) == "enabled"
+            else "stale_or_unrelated" if ppu_hot_bytes
+            else "not_produced"
+        ),
         "clock_windows": len(clocks),
         "presentation_rate_hz": round(sum(row["delta"] for row in clocks) * 1000 / total_ms, 3) if total_ms else None,
         "first_7_windows_mean_ms": round(sum(row["wall_ms"] for row in first) / len(first), 3) if first else None,
     }
+    loop_log = read(folder, "t26-loop-prof.log")
+    loop_blocks = re.split(r"(?=^window_ms=)", loop_log, flags=re.MULTILINE)
+    loop_rows = []
+    for block in loop_blocks:
+        header = re.search(r"^window_ms=(\d+) passes=(\d+) pass_avg_us=(\d+)", block, re.MULTILINE)
+        if not header or int(header.group(1)) == 0:
+            continue
+        logic = re.search(r"logic60 steps/s=([0-9.]+)", block)
+        du_skipped = re.search(r"du-render-skipped=(\d+)", block)
+        tasks = {}
+        for task in re.finditer(
+                r"task fn=(0x[0-9A-Fa-f]+).*?runs/pass=([0-9.]+) avg_us=\s*(\d+) max_us=\s*(\d+)"
+                r" gcm_runs=(\d+) gcm_kb/pass=([0-9.]+) extra/pass=([0-9.]+)"
+                r" extra_avg_us=\s*(\d+)", block):
+            tasks[task.group(1).upper()] = {
+                "runs_per_pass": float(task.group(2)),
+                "avg_us": int(task.group(3)),
+                "max_us": int(task.group(4)),
+                "gcm_runs": int(task.group(5)),
+                "gcm_kb_per_pass": float(task.group(6)),
+                "extra_per_pass": float(task.group(7)),
+                "extra_avg_us": int(task.group(8)),
+            }
+        loop_rows.append({
+            "window_us": int(header.group(1)),
+            "passes": int(header.group(2)),
+            "pass_rate_hz": int(header.group(2)) * 1_000_000 / int(header.group(1)),
+            "logic60_hz": float(logic.group(1)) if logic else None,
+            "du_render_skipped": int(du_skipped.group(1)) if du_skipped else 0,
+            "tasks": tasks,
+        })
+    pass_rates = [row["pass_rate_hz"] for row in loop_rows]
+    logic_rates = [row["logic60_hz"] for row in loop_rows if row["logic60_hz"] is not None]
+    scene_functions = sorted(set(re.findall(
+        r"scene_fn=(0x[0-9A-Fa-f]+)", loop_log)))
+    task_functions = sorted(set(re.findall(r"task fn=(0x[0-9A-Fa-f]+)", loop_log)))
+    task_function_set = {value.upper() for value in task_functions}
+    targets = {
+        "du_map": "0X001DBC58",
+        "level_screen": "0X001D1604",
+        "combat_task": "0X000D1490",
+    }
+    target_windows = {}
+    for name, fn in targets.items():
+        rows = [(index, row, row["tasks"][fn]) for index, row in enumerate(loop_rows, 1)
+                if fn in row["tasks"]]
+        stats = {
+            "windows": len(rows),
+            "window_numbers": [index for index, _, _ in rows],
+            "pass_rate_hz": describe_rates([row["pass_rate_hz"] for _, row, _ in rows], 30),
+            "logic60_steps_per_second": describe_rates(
+                [row["logic60_hz"] for _, row, _ in rows if row["logic60_hz"] is not None]),
+            "task_avg_us": describe_rates([task["avg_us"] for _, _, task in rows]),
+            "task_max_us": max((task["max_us"] for _, _, task in rows), default=None),
+            "task_runs_per_pass": describe_rates([task["runs_per_pass"] for _, _, task in rows]),
+            "task_gcm_kb_per_pass": describe_rates([task["gcm_kb_per_pass"] for _, _, task in rows]),
+            "task_extra_per_pass": describe_rates([task["extra_per_pass"] for _, _, task in rows]),
+            "task_extra_avg_us": describe_rates([task["extra_avg_us"] for _, _, task in rows]),
+        }
+        if name == "du_map":
+            stats["du_render_skipped_total"] = sum(
+                row["du_render_skipped"] for _, row, _ in rows)
+        target_windows[name] = stats
+    result["main_loop_profile"] = {
+        "windows": len(loop_rows),
+        "pass_rate_hz": describe_rates(pass_rates, 30),
+        "logic60_steps_per_second": describe_rates(logic_rates),
+        "logic_windows_59_to_61_hz": sum(59 <= value <= 61 for value in logic_rates),
+        "scene_functions": scene_functions,
+        "task_function_count": len(task_functions),
+        "target_tasks_seen": {
+            "du_map_0x001DBC58": "0X001DBC58" in task_function_set,
+            "level_screen_0x001D1604": "0X001D1604" in task_function_set,
+            "combat_task_0x000D1490": "0X000D1490" in task_function_set,
+        },
+        "target_task_windows": target_windows,
+    }
+    draw_windows = []
+    for line in read(folder, "t23-draw-prof.log").splitlines():
+        header = re.search(r"window_ms=([0-9.]+) frames=(\d+) draws=(\d+)", line)
+        if not header or float(header.group(1)) <= 0 or int(header.group(2)) <= 0:
+            continue
+        vc_hashed = re.search(r"\bvc_hashed_kb=(\d+)", line)
+        texture_counts = {
+            key: int(value) for key, value in re.findall(
+                r"\b(tex_lookup_calls|tex_lookup_hits|tex_lookup_entries|tex_uploads)=(\d+)", line)
+        }
+        draw_windows.append({
+            "window_ms": float(header.group(1)),
+            "frames": int(header.group(2)),
+            "draws": int(header.group(3)),
+            "vc_hashed_kb": int(vc_hashed.group(1)) if vc_hashed else None,
+            "texture_counts": texture_counts,
+            "cpu_stages_ms": {
+                key: float(value) for key, value in re.findall(
+                    r"([a-z_]+_ms)=([0-9.]+)", line) if key != "window_ms"
+            },
+        })
+    if draw_windows:
+        for row in draw_windows:
+            row["render_rate_hz"] = row["frames"] * 1000 / row["window_ms"]
+        result["draw_profile"] = {
+            "windows": len(draw_windows),
+            "frames": sum(row["frames"] for row in draw_windows),
+            "draws": sum(row["draws"] for row in draw_windows),
+            "draws_per_frame_weighted": round(
+                sum(row["draws"] for row in draw_windows) / sum(row["frames"] for row in draw_windows), 3),
+            "render_rate_hz": describe_rates([row["render_rate_hz"] for row in draw_windows], 30),
+            "draws_per_frame_min_window": round(
+                min(row["draws"] / row["frames"] for row in draw_windows), 3),
+            "draws_per_frame_max_window": round(
+                max(row["draws"] / row["frames"] for row in draw_windows), 3),
+            "window_ordinal_alignment_note": (
+                "Paired with t26 loop windows by ordinal; sampler windows start independently."
+            ),
+        }
+        for stats in target_windows.values():
+            paired = [draw_windows[index - 1] for index in stats["window_numbers"]
+                      if 0 < index <= len(draw_windows)]
+            stats["draw_profile_window_ordinal_match"] = {
+                "windows": len(paired),
+                "render_rate_hz": describe_rates(
+                    [row["render_rate_hz"] for row in paired], 30),
+                "draws_per_frame_weighted": round(
+                    sum(row["draws"] for row in paired) /
+                    sum(row["frames"] for row in paired), 3) if paired else None,
+                "mean_cpu_stage_ms_per_window": {
+                    key: round(sum(row["cpu_stages_ms"].get(key, 0) for row in paired) /
+                               len(paired), 3)
+                    for key in sorted({stage for row in paired for stage in row["cpu_stages_ms"]})
+                } if paired else {},
+                "cpu_stage_us_per_draw_weighted": {
+                    key: round(sum(row["cpu_stages_ms"].get(key, 0) for row in paired) *
+                               1000 / sum(row["draws"] for row in paired), 3)
+                    for key in sorted({stage for row in paired for stage in row["cpu_stages_ms"]})
+                } if paired and sum(row["draws"] for row in paired) else {},
+                "vc_hashed_kb_per_draw_weighted": round(
+                    sum(row["vc_hashed_kb"] for row in paired) /
+                    sum(row["draws"] for row in paired), 3)
+                    if paired and all(row["vc_hashed_kb"] is not None for row in paired)
+                    else None,
+                "texture_counts_total": {
+                    key: sum(row["texture_counts"].get(key, 0) for row in paired)
+                    for key in sorted({key for row in paired for key in row["texture_counts"]})
+                },
+            }
     fifo_fields = ("fifo_ms", "fifo_cpu_ms", "fifo_cpu_valid", "fifo_calls",
                    "fifo_max_ms", "sleep_ms", "sleep_calls", "sleep_max_ms")
     fifo_windows = list(records(read(folder, "t21-clock.log"), fifo_fields))

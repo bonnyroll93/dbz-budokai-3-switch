@@ -2441,7 +2441,7 @@ index dab4380..aafb346 100644
  /* ---- decoded state getters -------------------------------------------- */
  
 diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
-index b438d87..1cece1a 100644
+index b438d87..1793c21 100644
 --- a/libs/video/rsx_draw_engine.c
 +++ b/libs/video/rsx_draw_engine.c
 @@ -15,6 +15,7 @@
@@ -2452,19 +2452,29 @@ index b438d87..1cece1a 100644
  #include "rsx_vertex_formats.h"
  #include "rsx_vp_decompiler.h"
  
-@@ -23,6 +24,11 @@
+@@ -23,6 +24,13 @@
  #include <string.h>
  #include <time.h>
  
 +#ifdef __SWITCH__
 +static inline u64 eng_tick(void) { u64 t; __asm__ volatile("mrs %0, cntpct_el0" : "=r"(t)); return t; }
 +static u64 s_tex_hash_ticks, s_tex_hash_bytes, s_tex_hash_calls, s_tex_uploads;
++static u64 s_tex_lookup_ticks, s_tex_lookup_calls, s_tex_lookup_hits;
++static u64 s_tex_lookup_entries, s_tex_upload_ticks;
 +#endif
 +
  /* Guest memory and the RSX offset resolvers, declared the way every backend
   * that reads guest data declares them (rsx_vertex_fetch.h). */
  extern u8* vm_base;
-@@ -112,11 +118,15 @@ typedef struct {
+@@ -43,6 +51,7 @@ extern u32 ppu_vm_size;
+ #define ENG_MAX_TEXTURES   RSX_DRAW_ENGINE_TEXTURE_CACHE
+ #define ENG_MAX_VTEXTURES  64
+ #define ENG_MAX_PIPELINES  8192
++#define ENG_PIPELINE_SLOTS (ENG_MAX_PIPELINES * 2u)
+ #define ENG_MAX_BATCHES    256
+ #define ENG_VERT_STRIDE    (RSX_DSP_NUM_VERTEX_ATTR * 16u)
+ #define ENG_INVALID        0xFFFFFFFFu
+@@ -112,11 +121,15 @@ typedef struct {
  } eng_zdepth;
  
  typedef struct {
@@ -2481,7 +2491,16 @@ index b438d87..1cece1a 100644
  } eng_texture;
  
  typedef struct {
-@@ -195,6 +205,12 @@ static struct {
+@@ -149,6 +162,8 @@ static struct {
+     u32 n_textures;
+     eng_pipeline pipelines[ENG_MAX_PIPELINES];
+     u32 n_pipelines;
++    /* One-based indices into pipelines; at most half the slots are occupied. */
++    u16 pipeline_slots[ENG_PIPELINE_SLOTS];
+     eng_display_buffer display_buffers[8];
+ 
+     u32 frames;
+@@ -195,6 +210,12 @@ static struct {
      u64 verts_cap;
      u32 n_verts;
  
@@ -2494,7 +2513,7 @@ index b438d87..1cece1a 100644
      rsx_vertex_layout_plan layout;
      rsx_vertex_fetch_plan fetch_plan;
      int fetch_ok;
-@@ -749,6 +765,55 @@ void rsx_draw_engine_guest_wrote(u32 location, u32 offset, u32 pitch, u32 w, u32
+@@ -749,6 +770,55 @@ void rsx_draw_engine_guest_wrote(u32 location, u32 offset, u32 pitch, u32 w, u32
      g.be->color_target_write(g.be->user, s->handle, x, y, w, h, rows, w * 4u);
  }
  
@@ -2550,7 +2569,7 @@ index b438d87..1cece1a 100644
  static u32 eng_current_surface(void)
  {
      u32 slots[RSX_BE_MAX_COLOR_TARGETS];
-@@ -855,27 +920,49 @@ static u32 eng_texture_span(u32 fmt, u32 w, u32 h, u32 levels, u32 pitch, int cu
+@@ -855,27 +925,49 @@ static u32 eng_texture_span(u32 fmt, u32 w, u32 h, u32 levels, u32 pitch, int cu
      return lv[n - 1].offset + lv[n - 1].tl.face_bytes;
  }
  
@@ -2612,7 +2631,7 @@ index b438d87..1cece1a 100644
  static int eng_staging_reserve(u32 bytes)
  {
      if (g.tex_staging_cap >= bytes) return 1;
-@@ -920,9 +1007,77 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
+@@ -920,9 +1012,83 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
                                   g.tex_staging, tl->dst_row_bytes, tl->rows);
          }
      }
@@ -2667,8 +2686,14 @@ index b438d87..1cece1a 100644
 +                                   u32 levels, u32 pitch, int cube, u32 remap, u32* keep)
 +{
 +    for (int tries = 0; ; tries++) {
++#ifdef __SWITCH__
++        const u64 upload_t0 = eng_tick();
++#endif
 +        const u32 handle = eng_texture_upload(location, offset, fmt, w, h, levels, pitch,
 +                                              cube, remap);
++#ifdef __SWITCH__
++        s_tex_upload_ticks += eng_tick() - upload_t0;
++#endif
 +        if (handle || tries >= ENG_TEX_UPLOAD_TRIES) return handle;
 +        if (!eng_texture_evict_lru(keep)) return 0;
 +    }
@@ -2690,7 +2715,16 @@ index b438d87..1cece1a 100644
  /* The cache slot for a texture unit's bytes, keyed on where they are and what
   * the registers say they are. An already-cached entry is re-hashed at most
   * once per presented frame and re-decoded when the guest changed it, which is
-@@ -941,17 +1096,33 @@ static u32 eng_texture_slot(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
+@@ -937,21 +1103,46 @@ static u32 eng_texture_slot(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
+     const u32 span = eng_texture_span(fmt, w, h, levels, pitch, cube);
+     if (!span) return 0;
+ 
++#ifdef __SWITCH__
++    const u64 lookup_t0 = eng_tick();
++    s_tex_lookup_calls++;
++    s_tex_lookup_entries += g.n_textures;
++#endif
+     for (u32 i = 0; i < g.n_textures; i++) {
          eng_texture* e = &g.textures[i];
          if (e->location != location || e->offset != offset ||
              e->format != fmt || e->width != w || e->height != h ||
@@ -2698,6 +2732,10 @@ index b438d87..1cece1a 100644
              e->pitch != pitch || e->remap != remap ||
              e->cubemap != (u32)(cube != 0))
              continue;
++#ifdef __SWITCH__
++        s_tex_lookup_ticks += eng_tick() - lookup_t0;
++        s_tex_lookup_hits++;
++#endif
          if (e->handle && e->last_hash_frame != g.frames) {
 -            int readable = 0;
 -            const u64 hash = eng_texture_content_hash(location, offset, span,
@@ -2730,13 +2768,16 @@ index b438d87..1cece1a 100644
                  if (fresh) {
                      g.be->texture_release(g.be->user, e->handle);
                      e->handle = fresh;
-@@ -960,34 +1131,31 @@ static u32 eng_texture_slot(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
+@@ -960,34 +1151,34 @@ static u32 eng_texture_slot(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
              }
          }
          e->last_use_serial = ++g.texture_use_serial;
 +        e->last_use_frame = g.frames;
          return e->handle;
      }
++#ifdef __SWITCH__
++    s_tex_lookup_ticks += eng_tick() - lookup_t0;
++#endif
  
 -    u32 index;
 -    u32 evicted = 0;
@@ -2778,7 +2819,7 @@ index b438d87..1cece1a 100644
      return e.handle;
  }
  
-@@ -1008,8 +1176,10 @@ static void eng_textures_touch(u32 location, u32 offset, u32 bytes)
+@@ -1008,8 +1199,10 @@ static void eng_textures_touch(u32 location, u32 offset, u32 bytes)
  {
      for (u32 i = 0; i < g.n_textures; i++) {
          eng_texture* e = &g.textures[i];
@@ -2790,7 +2831,7 @@ index b438d87..1cece1a 100644
      }
  }
  
-@@ -1160,52 +1330,128 @@ static u32 eng_vtex_mask(void)
+@@ -1160,52 +1353,128 @@ static u32 eng_vtex_mask(void)
   * dim. No host sampling mode is unnormalised for these, so the fragment
   * program divides the coordinates instead, and the divisor makes the sizes
   * pipeline identity (rsx_live_draw.c keys them the same way). */
@@ -2941,7 +2982,7 @@ index b438d87..1cece1a 100644
      }
  
      /* A zero SET_SHADER_PROGRAM is "none", not "the program at offset 0": the
-@@ -1216,10 +1462,12 @@ static int eng_guest_programs(const u8** out_vp, u32* out_vp_instrs,
+@@ -1216,10 +1485,12 @@ static int eng_guest_programs(const u8** out_vp, u32* out_vp_instrs,
      if (rsx_dsp_reg(&g.rsx, 0x08E4)) {
          u32 fp_loc = 0;
          const u32 fp_off = rsx_dsp_fragment_program(&g.rsx, &fp_loc);
@@ -2958,7 +2999,7 @@ index b438d87..1cece1a 100644
      }
  
      if (out_vp) *out_vp = vp_uc;
-@@ -1234,14 +1482,8 @@ static int eng_guest_programs(const u8** out_vp, u32* out_vp_instrs,
+@@ -1234,14 +1505,8 @@ static int eng_guest_programs(const u8** out_vp, u32* out_vp_instrs,
  static void eng_vertex_layout(rsx_vertex_layout_plan* layout)
  {
      u32 mask = 0xFFFFu;
@@ -2975,7 +3016,7 @@ index b438d87..1cece1a 100644
      rsx_vertex_layout_plan_init(layout, mask);
  }
  
-@@ -1334,14 +1576,19 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+@@ -1334,14 +1599,19 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
      const int fixed = !eng_guest_programs(&vp_uc, &vp_instrs, &fp_uc, &fp_size);
  
      const u32 fp_ctrl  = rsx_dsp_shader_control(&g.rsx);
@@ -3000,7 +3041,7 @@ index b438d87..1cece1a 100644
  
      /* Identity: the vertex program's own bytes, the fragment program's
       * STRUCTURE (its inline constants are hoisted into the buffered block, so
-@@ -1353,9 +1600,16 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+@@ -1353,9 +1623,16 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
          static const u32 fixed_tag = 0x4E464958u;   /* "XIFN" */
          key = eng_fnv1a(&fixed_tag, sizeof fixed_tag, key);
      } else {
@@ -3020,7 +3061,39 @@ index b438d87..1cece1a 100644
          const u32 fp_ctrl_key = fp_ctrl & 0x40u;
          key = eng_fnv1a(&fp_ctrl_key, sizeof fp_ctrl_key, key);
          key = eng_fnv1a(&cube_mask, sizeof cube_mask, key);
-@@ -1578,6 +1832,285 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
+@@ -1371,12 +1648,18 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+     key = eng_fnv1a(&rt_count, sizeof rt_count, key);
+     key = rsx_draw_engine_hash_render_state(rs, key);
+ 
+-    for (u32 i = 0; i < g.n_pipelines; i++)
+-        if (g.pipelines[i].key == key) {
+-            *out_fixed = g.pipelines[i].fixed;
+-            *out_tex_used = g.pipelines[i].tex_used;
+-            return g.pipelines[i].handle;
++    u32 slot = (u32)(key ^ (key >> 32)) & (ENG_PIPELINE_SLOTS - 1u);
++    for (;;) {
++        const u16 index = g.pipeline_slots[slot];
++        if (!index) break;
++        const eng_pipeline* cached = &g.pipelines[index - 1u];
++        if (cached->key == key) {
++            *out_fixed = cached->fixed;
++            *out_tex_used = cached->tex_used;
++            return cached->handle;
+         }
++        slot = (slot + 1u) & (ENG_PIPELINE_SLOTS - 1u);
++    }
+     if (g.n_pipelines >= ENG_MAX_PIPELINES) return 0;
+ 
+     u32 handle = 0;
+@@ -1443,6 +1726,7 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+     g.pipelines[g.n_pipelines].tex_used =
+         (u16)(fixed ? 0xFFFFu : eng_sampled_units(s_ps_hlsl));
+     *out_tex_used = g.pipelines[g.n_pipelines].tex_used;
++    g.pipeline_slots[slot] = (u16)(g.n_pipelines + 1u);
+     g.n_pipelines++;
+     *out_fixed = fixed;
+     return handle;
+@@ -1578,6 +1862,330 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
      dc.n_verts = dc.n_refs;
  }
  
@@ -3178,6 +3251,12 @@ index b438d87..1cece1a 100644
 +    }
 +    if (emin > emax) return 0;
 +
++    /* Interleaved attributes often cover nearly the same guest bytes. Keep
++     * their descriptors in the key, then hash each covered byte once. */
++    typedef struct { u32 location; u64 start, end; } eng_vc_span;
++    eng_vc_span spans[RSX_DSP_NUM_VERTEX_ATTR];
++    u32 n_spans = 0;
++    if (layout->count > RSX_DSP_NUM_VERTEX_ATTR) return 0;
 +    for (u32 slot = 0; slot < layout->count; slot++) {
 +        const u32 attr = layout->attrs[slot];
 +        rsx_dsp_vertex_attr d;
@@ -3196,10 +3275,49 @@ index b438d87..1cece1a 100644
 +        const u64 end = prefix + (u64)emax * stride + elem;
 +        if (end > 0x100000000ull || end <= start || end - start > ENG_VC_MAX_RANGE)
 +            return 0;
-+        const u8* src = eng_guest_ptr(NULL, d.location, (u32)start, (u32)(end - start));
-+        if (!src) return 0;
-+        h = eng_hash_bytes(src, end - start, h);
-+        s_vc_hashed += end - start;
++        spans[n_spans].location = d.location;
++        spans[n_spans].start = start;
++        spans[n_spans].end = end;
++        n_spans++;
++    }
++    for (u32 i = 1; i < n_spans; i++) {
++        const eng_vc_span span = spans[i];
++        u32 j = i;
++        while (j && (spans[j - 1].location > span.location ||
++                     (spans[j - 1].location == span.location &&
++                      spans[j - 1].start > span.start))) {
++            spans[j] = spans[j - 1];
++            j--;
++        }
++        spans[j] = span;
++    }
++    for (u32 i = 0; i < n_spans;) {
++        u64 end = spans[i].end;
++        u32 j = i + 1;
++        while (j < n_spans && spans[j].location == spans[i].location &&
++               spans[j].start < end) {
++            if (spans[j].end > end) end = spans[j].end;
++            j++;
++        }
++        /* A very wide union, or a guest mapping with a boundary inside it,
++         * falls back to individually validated ranges. */
++        const u8* src = end - spans[i].start <= ENG_VC_MAX_RANGE
++            ? eng_guest_ptr(NULL, spans[i].location, (u32)spans[i].start,
++                            (u32)(end - spans[i].start)) : NULL;
++        if (src) {
++            h = eng_hash_bytes(src, end - spans[i].start, h);
++            s_vc_hashed += end - spans[i].start;
++        } else {
++            for (u32 k = i; k < j; k++) {
++                const u64 bytes = spans[k].end - spans[k].start;
++                src = eng_guest_ptr(NULL, spans[k].location, (u32)spans[k].start,
++                                    (u32)bytes);
++                if (!src) return 0;
++                h = eng_hash_bytes(src, bytes, h);
++                s_vc_hashed += bytes;
++            }
++        }
++        i = j;
 +    }
 +    return h ? h : 1u;
 +}
@@ -3306,11 +3424,11 @@ index b438d87..1cece1a 100644
  /* ---- sink ---------------------------------------------------------------- */
  
  static void sink_begin(void* user, const rsx_dispatch* r, u32 prim)
-@@ -1624,6 +2157,86 @@ static void sink_draw_index(void* user, const rsx_dispatch* r, u32 first, u32 co
+@@ -1624,6 +2232,86 @@ static void sink_draw_index(void* user, const rsx_dispatch* r, u32 first, u32 co
      dc.n_idx++;
  }
  
-+#ifdef __SWITCH__
++#if defined(__SWITCH__) && defined(DBZ3_T28_CAPTURE)
 +#include <sys/stat.h>
 +/* T28 (V1, white skin): the DBZ3 body program (592 bytes, 10 constants) gets
 + * its skin colour from a ramp texture on unit 1. Save the guest bytes of the
@@ -3393,17 +3511,17 @@ index b438d87..1cece1a 100644
  /* Which texture units this draw binds, and from where: a unit naming a
   * registered colour surface samples that live target rather than guest
   * memory (every post-process, shadow and reflection in a PS3 title is a
-@@ -1644,6 +2257,9 @@ static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
+@@ -1644,6 +2332,9 @@ static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
           * aliased surface a store to guest memory, for nothing. */
          if (!t.enabled || !((tex_used >> u) & 1u)) continue;
          mask |= 1u << u;
-+#ifdef __SWITCH__
++#if defined(__SWITCH__) && defined(DBZ3_T28_CAPTURE)
 +        eng_t28_dump(u, &t);
 +#endif
          eng_decode_sampler(t.filter, t.wrap, t.control0, &samplers[u]);
  
          int sampled = -1, own = 0, surface_at = -1;
-@@ -2057,10 +2673,59 @@ static void pd_present(u32 presented)
+@@ -2057,10 +2748,68 @@ static void pd_present(u32 presented)
      }
  }
  
@@ -3433,6 +3551,13 @@ index b438d87..1cece1a 100644
 +                (unsigned long long)s_tex_hash_bytes,
 +                (unsigned long long)s_tex_hash_calls,
 +                (unsigned long long)s_tex_uploads);
++        fprintf(f, " tex_lookup_ms=%llu tex_lookup_calls=%llu tex_lookup_hits=%llu"
++                   " tex_lookup_entries=%llu tex_upload_ms=%llu",
++                (unsigned long long)(s_tex_lookup_ticks / 19200ull),
++                (unsigned long long)s_tex_lookup_calls,
++                (unsigned long long)s_tex_lookup_hits,
++                (unsigned long long)s_tex_lookup_entries,
++                (unsigned long long)(s_tex_upload_ticks / 19200ull));
 +        fprintf(f, " vc_hits=%llu vc_misses=%llu vc_stores=%llu vc_uncacheable=%llu"
 +                " vc_hashed_kb=%llu vc_mb=%llu\n",
 +                (unsigned long long)s_vc_hits, (unsigned long long)s_vc_misses,
@@ -3446,6 +3571,8 @@ index b438d87..1cece1a 100644
 +    s_dsec_t0 = now;
 +    s_dsec_frame0 = g.frames;
 +    s_tex_hash_ticks = s_tex_hash_bytes = s_tex_hash_calls = s_tex_uploads = 0;
++    s_tex_lookup_ticks = s_tex_lookup_calls = s_tex_lookup_hits = 0;
++    s_tex_lookup_entries = s_tex_upload_ticks = 0;
 +}
 +#define ENG_SEC(i) do { const u64 _n = eng_tick(); s_dsec[i] += _n - _dt; _dt = _n; } while (0)
 +#else
@@ -3463,7 +3590,7 @@ index b438d87..1cece1a 100644
  
      const u32 prim = g.rsx.current_primitive;
      /* Everything that becomes triangles -- lists, strips, fans, quads, quad
-@@ -2082,7 +2747,36 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -2082,7 +2831,36 @@ static void sink_end(void* user, const rsx_dispatch* r)
  
      rsx_vertex_layout_plan layout;
      eng_vertex_layout(&layout);
@@ -3501,7 +3628,7 @@ index b438d87..1cece1a 100644
      if (!dc.n_verts || !dc.fetch_ok) return;
  
      int indexed = 0;
-@@ -2091,7 +2785,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -2091,7 +2869,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
          if (!eng_topology_rebuild(prim, dc.refs_remapped, &indexed)) return;
          n_draw = indexed
              ? rsx_draw_engine_topology_index_count(prim, dc.n_source_refs,
@@ -3510,7 +3637,7 @@ index b438d87..1cece1a 100644
              : dc.n_source_refs - dc.n_source_refs % 3u;
      }
      if (!n_draw) return;
-@@ -2110,6 +2804,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -2110,6 +2888,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
      rsx_dsp_get_viewport(&g.rsx, &vp);
      const u32 zslot = eng_zdepth_get(sf.zeta_location, sf.zeta_offset,
                                       sf.clip_w, sf.clip_h);
@@ -3518,7 +3645,7 @@ index b438d87..1cece1a 100644
  
      /* A guest program pair that will not translate has no fallback: the draw
       * is dropped, as the reference engine drops it. Substituting the built-in
-@@ -2120,6 +2815,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -2120,6 +2899,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
      const u32 pipeline = eng_pipeline_get(&layout, &rs,
                                            eng_surface_format(sf.color_format),
                                            n_targets, &pipeline_is_fixed, &tex_used);
@@ -3526,7 +3653,7 @@ index b438d87..1cece1a 100644
      if (!pipeline) return;
  
      /* Textures before any pipeline or target binding: a cache refresh can
-@@ -2136,12 +2832,13 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -2136,12 +2916,13 @@ static void sink_end(void* user, const rsx_dispatch* r)
                                              textures, samplers);
      const u32 vtex_mask = sink_bind_vertex_textures(eng_vtex_mask(), vtextures,
                                                      vsamplers);
@@ -3542,7 +3669,7 @@ index b438d87..1cece1a 100644
              g.indices);
      }
  
-@@ -2179,6 +2876,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -2179,6 +2960,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
        alpha[0] = rsx_fp_alpha_ref(rs.alpha_ref_raw, rs.alpha_ref_format);
        alpha[1] = alpha[2] = alpha[3] = 0.0f; }
  
@@ -3550,7 +3677,7 @@ index b438d87..1cece1a 100644
      pd_note(targets, n_targets, zslot, &rs, pipeline, tex_mask);
  
      /* The depth attachment is cleared the first time it is bound, so a title
-@@ -2229,8 +2927,10 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -2229,8 +3011,10 @@ static void sink_end(void* user, const rsx_dispatch* r)
                            rsx_dsp_reg(&g.rsx, M_STENCIL_FUNC_REF) & 0xFFu);
  
      const u32 uploaded = indexed ? dc.n_verts : n_draw;
@@ -3562,7 +3689,7 @@ index b438d87..1cece1a 100644
      /* Counted only when the draw ran the guest's OWN programs, which is what
       * the test hook means: a draw through the built-in pair is a draw, not
       * evidence that the decompile-translate-compile path worked. */
-@@ -2241,6 +2941,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -2241,6 +3025,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
          g.zdepths[zslot].had_write = 1;
          eng_zdepth_wrote(zslot, &sf);
      }
@@ -3570,7 +3697,7 @@ index b438d87..1cece1a 100644
  }
  
  static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
-@@ -2341,6 +3042,7 @@ static void eng_present(u32 buffer_id)
+@@ -2341,6 +3126,7 @@ static void eng_present(u32 buffer_id)
      g.last_present_surface = target;
      g.be->present(g.be->user, g.surfaces[target].handle);
      g.frames++;
@@ -3578,7 +3705,7 @@ index b438d87..1cece1a 100644
      g.last_guest_draws = g.guest_draws;
      g.guest_draws = 0;
  }
-@@ -2450,6 +3152,13 @@ void rsx_draw_engine_method(u32 method, u32 arg)
+@@ -2450,6 +3236,13 @@ void rsx_draw_engine_method(u32 method, u32 arg)
      rsx_dispatch_method(&g.rsx, m, arg);
  }
  

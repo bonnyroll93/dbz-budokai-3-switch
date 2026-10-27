@@ -21,3 +21,14 @@ $arguments = @((Join-Path $project 'scripts\gen-deko3d-shaders.py'),
                '--uam', $uam, '--incremental')
 & $Python @arguments
 if ($LASTEXITCODE -ne 0) { throw "Deko3D shader prebuild failed (exit $LASTEXITCODE); NSP NOT generated." }
+
+# The generated header is included by the Deko3D backend, but the current
+# Switch Ninja tree does not consistently track that header as a dependency.
+# Advance the backend source timestamp whenever the shader table changes.
+$header = Join-Path $project 'third_party\ps3recomp\libs\video\deko3d\rsx_deko3d_shaders.h'
+$backend = Join-Path $project 'third_party\ps3recomp\libs\video\rsx_deko3d_backend.c'
+if ((Get-Item -LiteralPath $header).LastWriteTimeUtc -gt
+    (Get-Item -LiteralPath $backend).LastWriteTimeUtc) {
+    (Get-Item -LiteralPath $backend).LastWriteTimeUtc = (Get-Date).ToUniversalTime()
+    Write-Host 'Deko3D shader table changed; rebuilding backend.'
+}

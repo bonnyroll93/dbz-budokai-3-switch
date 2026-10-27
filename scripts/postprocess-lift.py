@@ -73,14 +73,15 @@ def main() -> None:
                  "extern \"C\" int g_t23_postfx_nowait;\n"
                  "void func_002909C0(ppu_context* ctx) {\n"
                  "        if (g_t23_postfx_nowait) return;")
-    # DU effects list: Namek crash 0x2F41A00C is a read at node+0xC,
-    # where node=0x2F41A000 came from (ctx->gpr[30]+0x14)+0x20.
-    # That address is in the unmapped RSX control window. Skip only a bad
-    # effects node and retain the surrounding scene/task progression.
+    # DU effects list: Namek has produced reads at 0x2F41A00C, 0x8000000C,
+    # 0x39DDA00C and 0x3D3155D8. Those regions are not committed on Switch.
+    # Skip only a bad effects node and retain scene/task progression. The
+    # regions mirror the committed main/RSX, raw SPU, local RSX and stack VA.
     replace_once(chunk3, "void func_001D1EC0(ppu_context* ctx) {",
                  "static inline bool dbz3_du_effect_node_valid(uint32_t p) {\n"
-                 "    return (p >= 0x10000u && p <= 0x1FFFFFCCu) ||\n"
-                 "           (p >= 0x30000000u && p <= 0xDFFFFFCCu);\n"
+                 "    return !(p & 3u) && ((p >= 0x10000u && p <= 0x1FFFFFCCu) ||\n"
+                 "           (p >= 0x30000000u && p <= 0x301FFFCCu) ||\n"
+                 "           (p >= 0xC0000000u && p <= 0xDFFFFFCCu));\n"
                  "}\n"
                  "void func_001D1EC0(ppu_context* ctx) {")
     replace_once(chunk3,

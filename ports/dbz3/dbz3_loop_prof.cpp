@@ -30,7 +30,7 @@
 #ifdef __SWITCH__
 #include <switch.h>
 static inline uint64_t lp_ticks(void) { return armGetSystemTick(); }
-static inline uint64_t lp_us(uint64_t t) { return t / 19u; } /* 19.2 MHz */
+static inline uint64_t lp_us(uint64_t t) { return (t * 5u) / 96u; } /* 19.2 MHz */
 #else
 #include <chrono>
 static inline uint64_t lp_ticks(void)
