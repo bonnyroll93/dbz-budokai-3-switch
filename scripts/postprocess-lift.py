@@ -76,11 +76,16 @@ def main() -> None:
     # DU effects list: Namek has produced reads at 0x2F41A00C, 0x8000000C,
     # 0x39DDA00C and 0x3D3155D8. Those regions are not committed on Switch.
     # Skip only a bad effects node and retain scene/task progression. The
-    # regions mirror the committed main/RSX, raw SPU, local RSX and stack VA.
+    # regions mirror main/RSX, raw SPU, the sys_memory allocation window,
+    # local RSX and stack VA. Namek allocates 0x41100000..0x41300000 and
+    # 0x41300000..0x4A800000, so rejecting 0x4... nodes hides its scene.
     replace_once(chunk3, "void func_001D1EC0(ppu_context* ctx) {",
+                 "extern \"C\" uint32_t g_sys_mem_bump_ptr;\n"
                  "static inline bool dbz3_du_effect_node_valid(uint32_t p) {\n"
                  "    return !(p & 3u) && ((p >= 0x10000u && p <= 0x1FFFFFCCu) ||\n"
                  "           (p >= 0x30000000u && p <= 0x301FFFCCu) ||\n"
+                 "           (p >= 0x40000000u && g_sys_mem_bump_ptr >= 0x40000034u &&\n"
+                 "            p <= g_sys_mem_bump_ptr - 0x34u) ||\n"
                  "           (p >= 0xC0000000u && p <= 0xDFFFFFCCu));\n"
                  "}\n"
                  "void func_001D1EC0(ppu_context* ctx) {")

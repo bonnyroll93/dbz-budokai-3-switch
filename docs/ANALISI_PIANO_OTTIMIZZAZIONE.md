@@ -105,6 +105,20 @@ La diagnosi visiva resta aperta: i draw rifiutati possono spiegare elementi asse
 
 L'utente riferisce in seguito che Namek non va più in crash ma mostra soltanto lo skybox. Questa segnalazione è arrivata prima della prova del nuovo NSP `namek-shaders-guard3`, quindi non verifica ancora l'effetto della ricompilazione shader. Il tentativo di acquisire subito altri log non ha trovato la Switch in modalità DBI MTP responder. Dopo la prova del nuovo NSP, controllare marker build, messaggi `pipeline refused` e una cattura della scena: se resta il solo skybox, proseguire sul percorso dei draw della geometria e sul caricamento degli asset, senza attribuire il difetto alla lista effetti.
 
+### Namek `run38`: causa della mappa vuota
+
+La foto fornita dall'utente mostra Goku con vestiti e capelli visibili, pelle bianca, cielo verde e nessun terreno. `run38` conferma il marker `Oct 27 2026 20:41:25`, quindi è la build `namek-shaders-guard3`. Nell'ultima sessione di `t22-gpu.log` non appaiono più `pipeline refused`: la ricompilazione degli shader ha rimosso quel problema, ma non ha ripristinato la mappa.
+
+Il log `t19-stderr.log` mostra invece che la guardia scarta nodi `0x40000000`, `0x412F4240`, `0x412F4600`, `0x47900000` e `0x42900000`. Nella stessa esecuzione `sys_memory_allocate` ha allocato `0x40000000..0x40D00000`, `0x40D00000..0x41100000`, `0x41100000..0x41300000` e `0x41300000..0x4A800000`. Quei nodi sono quindi in memoria guest allocata; l'intervallo `0x40000000..0x50000000` era stato escluso per errore dalla guardia. Il profilo della mappa registra circa 79 draw/frame nelle finestre DU appaiate, contro centinaia nelle precedenti sessioni con mappe complete; l'appaiamento dei profiler è approssimato, ma coerente con la foto.
+
+La correzione `namek-effect-heap-guard` ammette i nodi nella finestra `sys_memory` fino a `g_sys_mem_bump_ptr - 0x34`, lasciando esclusi `0x2F41A000`, `0x39DDA000`, `0x3D3155CC`, `0x80000000` e `0xF0000000`. Il limite dinamico impedisce di accettare indirizzi oltre le allocazioni correnti. Resta da provare su Switch che la scena torni visibile e che il movimento non riapra il crash.
+
+Build verificata: `build/dev/dbz3/baselines/namek-effect-heap-guard.nsp`, SHA256 `AD28DD7A726736695470A8EEE9AC25F06560182873C401E06854CF4C7408C97A`; ELF SHA256 `BB7E8491A0AB5A0DFA8649457EE06C3EE19295F7CF0793DCC446E35CD848C896`, marker atteso `[build] compiled Oct 27 2026 20:53:34`. Il codice PPU rigenerato contiene il limite dinamico. La prova statica con il bump pointer osservato (`0x4A800000`) accetta i nodi validi riportati da `run38` e respinge gli indirizzi dei crash precedenti; questo non sostituisce la prova sulla console.
+
+La pelle bianca è un difetto distinto. L'override `ps_511e3e7252f5f9dc` del Duello usa un ramo di controllo fuori schermo; l'override `ps_dcfe671525a85775` della mappa applica già lo stesso schema, ma la foto conferma che il problema persiste su Namek. Prima di cambiare altro shader occorre catturare i passaggi della nuova scena per identificare il programma del corpo di Goku in questa mappa e verificare il campionamento della texture ramp.
+
+È stato scritto sulla SD il marker `map-capture-after` con valore `45`, verificato rileggendolo via MTP. Durante la prova del nuovo NSP, una cattura grafica partirà 45 secondi dopo l'avvio; il giocatore deve essere nella mappa Namek in quel momento. La cattura può causare un breve rallentamento. Dopo la prova, copiare `map-pass-dump` e rimuovere il marker per evitare catture ripetute.
+
 ### Criterio per confronti validi
 
 La baseline e la build ottimizzata devono usare la stessa scena, build di gioco e configurazione, stessa durata e procedura. I profili PPU con campionamento per funzione servono a localizzare il costo ma aggiungono overhead: per il risultato FPS finale usare una build senza profiler per funzione e confrontarla con un'altra build altrettanto non strumentata.
