@@ -90,6 +90,7 @@ struct TaskStat {
     uint32_t task;        /* last task object seen with it */
     uint32_t order;       /* position in the list, last pass */
     uint64_t runs, us, max_us, gcm_runs, gcm_bytes;
+    uint64_t extra_runs, extra_us;
 };
 
 struct Window {
@@ -137,6 +138,8 @@ void add(int slot, uint64_t us)
     g_w.sum[slot] += us;
     if (us > g_w.max[slot]) g_w.max[slot] = us;
 }
+
+int task_class(uint32_t fn);
 
 void flush(uint64_t now)
 {
@@ -202,11 +205,14 @@ void flush(uint64_t now)
             const TaskStat& t = g_w.tasks[i];
             fprintf(g_log,
                     "  task fn=0x%08X obj=0x%08X order=%2u runs/pass=%.2f avg_us=%6.0f"
-                    " max_us=%6llu gcm_runs=%llu gcm_kb/pass=%.1f\n",
+                    " max_us=%6llu gcm_runs=%llu gcm_kb/pass=%.1f extra/pass=%.2f extra_avg_us=%.0f class=%u\n",
                     t.fn, t.task, t.order, (double)t.runs / tp,   /* regular pass only */
                     t.runs ? (double)t.us / (double)t.runs : 0.0,
                     (unsigned long long)t.max_us, (unsigned long long)t.gcm_runs,
-                    (double)t.gcm_bytes / 1024.0 / tp);
+                    (double)t.gcm_bytes / 1024.0 / tp,
+                    (double)t.extra_runs / tp,
+                    t.extra_runs ? (double)t.extra_us / (double)t.extra_runs : 0.0,
+                    (unsigned)task_class(t.fn));
         }
     }
     fflush(g_log);
@@ -532,6 +538,18 @@ void record_task(uint32_t fn, uint32_t task, uint32_t order, uint64_t us,
     }
 }
 
+void record_extra_task(uint32_t fn, uint64_t us)
+{
+    for (int i = 0; i < kMaxTasks; ++i) {
+        TaskStat& t = g_w.tasks[i];
+        if (t.fn != fn && t.fn != 0) continue;
+        t.fn = fn;
+        t.extra_runs++;
+        t.extra_us += us;
+        return;
+    }
+}
+
 } // namespace
 
 #ifdef PORT_DBZ3_LEVEL_FUNCTION_PROFILE
@@ -787,7 +805,9 @@ int extra_logic_step(ppu_context* ctx)
                 ctx->gpr[2] = vm_read32(opd + 4u);
                 ctx->lr = 0x00029050u;
                 g_dbz3_cur_task_fn = fn; g_dbz3_cur_pass = 2;
+                const uint64_t extra_task_t0 = lp_ticks();
                 ps3_indirect_call(ctx); DRAIN_TRAMPOLINE(ctx);
+                record_extra_task(fn, lp_us(lp_ticks() - extra_task_t0));
                 g_dbz3_cur_task_fn = 0; g_dbz3_cur_pass = 0;
                 ctx->gpr[2] = vm_read64(ctx->gpr[1] + 0x28);
                 ++ran;
