@@ -1,5 +1,7 @@
 # Bug attivi
 
+Priorità attuale: resa grafica. Pubblico del Torneo Tenkaichi, aura e proiettili energetici presentano texture, tiling o trasparenza errati. Stato dell'indagine e prove necessarie in [GRAPHICS_INVESTIGATION.md](GRAPHICS_INVESTIGATION.md).
+
 Indagine foto e log `run07`: pelle bianca e distorsione sull'acqua ancora aperte; importati altri due vertex shader da catture precedenti, senza attribuire loro una risoluzione visiva non verificata. La mappa DU ha un costo elevato nelle passate extra che ripetono aggiornamento e disegno. Dettagli in [DRAGON_UNIVERSE_RUN07.md](DRAGON_UNIVERSE_RUN07.md).
 
 Aggiornamento `run05`: l'ottimizzazione dell'ordinamento porta la schermata esperienza/livello a circa 14 FPS, ancora sotto l'obiettivo di 30. Il task di disegno principale impiega 58–65 ms per passaggio.

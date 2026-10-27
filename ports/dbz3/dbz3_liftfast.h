@@ -139,6 +139,16 @@ LF_INLINE void lf_write64(uint64_t ea, uint64_t v)
 #define vm_write32(a, v) lf_write32((a), (v))
 #define vm_write64(a, v) lf_write64((a), (v))
 
+#ifdef PORT_DBZ3_LEVEL_FUNCTION_PROFILE
+extern "C" uint64_t dbz3_level30790_begin(void);
+extern "C" void dbz3_level30790_end(uint64_t start);
+struct dbz3_level30790_scope {
+    uint64_t start;
+    dbz3_level30790_scope() : start(dbz3_level30790_begin()) {}
+    ~dbz3_level30790_scope() { dbz3_level30790_end(start); }
+};
+#endif
+
 /* Reproduce selection-sort swaps in O(n log n). A stable sort is NOT
  * equivalent: the original swaps can reorder equal-depth objects. Each tree
  * node selects the greatest key, breaking ties by current list position.

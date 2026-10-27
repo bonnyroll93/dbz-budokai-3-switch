@@ -14,6 +14,10 @@ param(
     [switch]$NoBuild,
     # Record the innermost lifted PPU function every millisecond.
     [switch]$ProfilePpuFunctions,
+    # Time func_00030790 only while the level-screen task runs.
+    [switch]$LevelFunctionProfile,
+    # Log input queue age, depth and dropped events every five seconds.
+    [switch]$InputQueueProfile,
     [ValidateRange(1, 16)]
     [int]$Jobs = 4,
     [string]$DevkitPro = $(if ($env:DEVKITPRO) { $env:DEVKITPRO } else { 'C:\devkitPro' })
@@ -31,7 +35,8 @@ if (-not $NoBuild) {
     & (Join-Path $PSScriptRoot 'prebuild-shaders.ps1') -DevkitPro $DevkitPro
     # Reconfigure on every run so changed CMake options and SDK paths are used.
     & (Join-Path $PSScriptRoot 'configure-switch.ps1') -DevkitPro $DevkitPro `
-        -ProfilePpuFunctions:$ProfilePpuFunctions
+        -ProfilePpuFunctions:$ProfilePpuFunctions -LevelFunctionProfile:$LevelFunctionProfile `
+        -InputQueueProfile:$InputQueueProfile
     $bash = Join-Path $DevkitPro 'msys2\usr\bin\bash.exe'
     if (-not (Test-Path -LiteralPath $bash -PathType Leaf)) { throw "MSYS2 not found: $bash" }
     $tree = "build/cmake/$($g.Tree)"

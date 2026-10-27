@@ -34,6 +34,7 @@ DU_START = 'void func_001DBC58(ppu_context* ctx) {\n'
 DU_TAIL = 'loc_001DE4F4:\n'
 DU_TAIL_MID = '        ctx->lr = 0x001DE598; func_00019818(ctx);'
 DU_END = 'loc_001DE61C:\n'
+LEVEL_FN = 'void func_00030790(ppu_context* ctx) {\n'
 
 
 def setters(paths):
@@ -115,6 +116,16 @@ def main():
         du = du.replace(mid, mid + '\n        dbz3_du_phase_probe(2);', 1)
         du = du.replace(DU_END, DU_END + '        dbz3_du_phase_probe(3);\n', 1)
         text = text[:begin] + du + text[finish:]
+
+    # Scope timing follows every exit path of the lifted function. This is
+    # compiled only for the dedicated diagnostic build.
+    if LEVEL_FN in text:
+        if text.count(LEVEL_FN) != 1:
+            sys.exit('ppu_liftfast.py: func_00030790 count changed')
+        text = text.replace(LEVEL_FN, LEVEL_FN +
+                            '#ifdef PORT_DBZ3_LEVEL_FUNCTION_PROFILE\n'
+                            '        dbz3_level30790_scope dbz3_level30790_timer;\n'
+                            '#endif\n', 1)
 
     if INCLUDE in text:
         text = text.replace(INCLUDE, INCLUDE + '\n#include "dbz3_liftfast.h"\nextern "C" void dbz3_du_phase_probe(uint32_t);\nextern "C" int dbz3_du_skip_render(void);', 1)

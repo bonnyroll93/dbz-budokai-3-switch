@@ -32,6 +32,7 @@
 #include "rsx_deko3d_backend.h"
 #include "rsx_draw_engine.h"
 #include "deko3d/rsx_deko3d_shaders.h"
+#include "../../runtime/platform/switch_debug.h"
 
 /* <switch.h> is not included: libnx's u128/s128 clash with ps3types.h. The
  * two libnx symbols needed here are declared by hand instead. */
@@ -207,6 +208,7 @@ typedef struct dk_target {
     DkImageFormat dk_fmt;
     rsx_be_format fmt;
     u32 w, h, bpp;
+    u32 logical_w, logical_h;      /* guest dimensions before render scaling */
     u32 block;                     /* BC block bytes, 0 for a linear format  */
     u32 mips;
     u8  swz[4];                    /* DkImageSwizzle per output r,g,b,a      */
@@ -264,7 +266,6 @@ static struct {
     DkImage     swap_images[DK_NUM_SWAP];
     DkMemBlock  mem_swap;
     DkSwapchain swapchain;
-    int fps_overlay;                 /* FPS counter on the display (default on) */
 
     dk_alloc  alloc;
     dk_target surfaces[DK_MAX_SURFACES + 1];   /* handle = index, 0 = none */
@@ -275,6 +276,15 @@ static struct {
     u32 bound_color[RSX_BE_MAX_COLOR_TARGETS];
     u32 bound_count, bound_depth;
     int bound_dirty;
+
+    /* State recorded in the current command list, not guest-side bindings. */
+    struct {
+        int pipeline_valid, textures_valid, viewport_valid, scissor_valid;
+        u32 pipeline, stencil_ref, vertex_stride;
+        DkResHandle textures[16];
+        DkViewport viewport;
+        DkScissor scissor;
+    } recorded;
 
     /* Stage 2. */
     DkMemBlock mem_code;           /* shader code, appended on first use     */
@@ -401,6 +411,7 @@ static void dk_alloc_give(dk_alloc* a, u32 off, u32 size)
 static void dk_cmd_reset(void)
 {
     dkCmdBufClear(s_dk.cmd);
+    memset(&s_dk.recorded, 0, sizeof s_dk.recorded);
     dkCmdBufAddMemory(s_dk.cmd, s_dk.mem_cmd, 0, DK_CMD_SIZE);
     s_dk.spare_in_use = 0;
     s_dk.ops = 0;
@@ -648,6 +659,61 @@ static void dk_upload_rect(dk_target* t, u32 x, u32 y, u32 w, u32 h,
     dk_submit_wait();
 }
 
+static u32 dk_scaled_dim(u32 logical)
+{
+    u32 n = (logical * (u32)switch_debug_snapshot().active_scale_tenths + 5u) / 10u;
+    return n ? n : 1u;
+}
+
+static u32 dk_scale_edge(u32 edge, u32 logical, u32 physical)
+{
+    if (!logical) return 0;
+    if (edge >= logical) return physical;
+    return (u32)((u64)edge * physical / logical);
+}
+
+static void dk_scaled_rect(const dk_target* t, u32 x, u32 y, u32 w, u32 h,
+                           u32* px, u32* py, u32* pw, u32* ph)
+{
+    u32 x0 = dk_scale_edge(x, t->logical_w, t->w);
+    u32 y0 = dk_scale_edge(y, t->logical_h, t->h);
+    u32 x1 = dk_scale_edge(x + w, t->logical_w, t->w);
+    u32 y1 = dk_scale_edge(y + h, t->logical_h, t->h);
+    if (w && x1 <= x0 && x0 < t->w) x1 = x0 + 1;
+    if (h && y1 <= y0 && y0 < t->h) y1 = y0 + 1;
+    *px = x0; *py = y0; *pw = x1 - x0; *ph = y1 - y0;
+}
+
+static void dk_upload_logical(dk_target* t, u32 x, u32 y, u32 w, u32 h,
+                              const void* rows, u32 pitch)
+{
+    if (!rows || !w || !h) return;
+    u32 px, py, pw, ph;
+    dk_scaled_rect(t, x, y, w, h, &px, &py, &pw, &ph);
+    if (!pw || !ph || (u64)pw * ph * t->bpp > DK_STAGING_SIZE) return;
+    if (t->w == t->logical_w && t->h == t->logical_h) {
+        dk_upload_rect(t, px, py, pw, ph, rows, pitch);
+        return;
+    }
+    u8* reduced = (u8*)malloc((size_t)pw * ph * t->bpp);
+    if (!reduced) return;
+    for (u32 r = 0; r < ph; r++) {
+        u32 sy = (u32)((u64)(py + r) * t->logical_h / t->h);
+        if (sy < y) sy = y;
+        if (sy >= y + h) sy = y + h - 1;
+        for (u32 c = 0; c < pw; c++) {
+            u32 sx = (u32)((u64)(px + c) * t->logical_w / t->w);
+            if (sx < x) sx = x;
+            if (sx >= x + w) sx = x + w - 1;
+            memcpy(reduced + ((size_t)r * pw + c) * t->bpp,
+                   (const u8*)rows + (size_t)(sy - y) * pitch + (size_t)(sx - x) * t->bpp,
+                   t->bpp);
+        }
+    }
+    dk_upload_rect(t, px, py, pw, ph, reduced, pw * t->bpp);
+    free(reduced);
+}
+
 static u32 be_color_target_create(void* user, rsx_be_format fmt, u32 w, u32 h,
                                   const void* seed, u32 seed_row_bytes)
 {
@@ -662,7 +728,7 @@ static u32 be_color_target_create(void* user, rsx_be_format fmt, u32 w, u32 h,
     for (u32 i = 1; i <= DK_MAX_SURFACES; i++) {
         dk_target* t = &s_dk.surfaces[i];
         if (t->used) continue;
-        if (dk_image_create(t, dk_fmt, w, h, 1,
+        if (dk_image_create(t, dk_fmt, dk_scaled_dim(w), dk_scaled_dim(h), 1,
                             DkImageFlags_UsageRender | DkImageFlags_Usage2DEngine)) {
             s_dk.st.target_fail++;
             dk_err("colour target %ux%u fmt %d: out of image memory\n", w, h, (int)fmt);
@@ -670,17 +736,18 @@ static u32 be_color_target_create(void* user, rsx_be_format fmt, u32 w, u32 h,
         }
         t->fmt = fmt;
         t->bpp = bpp;
+        t->logical_w = w; t->logical_h = h;
         t->mips = 1;
         dk_write_image_desc(i, &t->image, NULL);    /* sampled as a texture */
         if (seed) {
-            dk_upload_rect(t, 0, 0, w, h, seed, seed_row_bytes ? seed_row_bytes : w * bpp);
+            dk_upload_logical(t, 0, 0, w, h, seed, seed_row_bytes ? seed_row_bytes : w * bpp);
         } else {
             /* Defined contents: opaque black, like the Vulkan backend. */
             DkImageView view;
             dkImageViewDefaults(&view, &t->image);
             DkImageView const* views[1] = { &view };
             dkCmdBufBindRenderTargets(s_dk.cmd, views, 1, NULL);
-            DkScissor sc = { 0, 0, w, h };
+            DkScissor sc = { 0, 0, t->w, t->h };
             dkCmdBufSetScissors(s_dk.cmd, 0, &sc, 1);
             dkCmdBufClearColorFloat(s_dk.cmd, 0, DkColorMask_RGBA, 0.0f, 0.0f, 0.0f, 1.0f);
             s_dk.bound_dirty = 1;
@@ -713,10 +780,10 @@ static void be_color_target_write(void* user, u32 surface, u32 x, u32 y, u32 w,
     (void)user;
     if (!surface || surface > DK_MAX_SURFACES || !s_dk.surfaces[surface].used) return;
     dk_target* t = &s_dk.surfaces[surface];
-    if (x >= t->w || y >= t->h) return;
-    if (w > t->w - x) w = t->w - x;
-    if (h > t->h - y) h = t->h - y;
-    dk_upload_rect(t, x, y, w, h, rows, row_bytes);
+    if (x >= t->logical_w || y >= t->logical_h) return;
+    if (w > t->logical_w - x) w = t->logical_w - x;
+    if (h > t->logical_h - y) h = t->logical_h - y;
+    dk_upload_logical(t, x, y, w, h, rows, row_bytes);
     s_dk.st.writes++;
 }
 
@@ -727,15 +794,16 @@ static u32 be_depth_target_create(void* user, u32 w, u32 h)
     for (u32 i = 1; i <= DK_MAX_DEPTHS; i++) {
         dk_target* t = &s_dk.depths[i];
         if (t->used) continue;
-        if (dk_image_create(t, DkImageFormat_Z24S8, w, h, 1, DkImageFlags_UsageRender)) {
+        if (dk_image_create(t, DkImageFormat_Z24S8, dk_scaled_dim(w), dk_scaled_dim(h), 1, DkImageFlags_UsageRender)) {
             dk_err("depth target %ux%u: out of image memory\n", w, h);
             return 0;
         }
         t->bpp = 4;
+        t->logical_w = w; t->logical_h = h;
         DkImageView view;
         dkImageViewDefaults(&view, &t->image);
         dkCmdBufBindRenderTargets(s_dk.cmd, NULL, 0, &view);
-        DkScissor sc = { 0, 0, w, h };
+        DkScissor sc = { 0, 0, t->w, t->h };
         dkCmdBufSetScissors(s_dk.cmd, 0, &sc, 1);
         dkCmdBufClearDepthStencil(s_dk.cmd, true, 1.0f, 0xFF, 0);  /* far plane */
         s_dk.bound_dirty = 1;
@@ -853,25 +921,44 @@ static void be_readback(void* user, u32 surface, u32 x, u32 y, u32 w, u32 h,
     (void)user;
     if (!out || !surface || surface > DK_MAX_SURFACES || !s_dk.surfaces[surface].used) return;
     dk_target* t = &s_dk.surfaces[surface];
-    if (x >= t->w || y >= t->h || !w || !h) return;
-    if (w > t->w - x) w = t->w - x;
-    if (h > t->h - y) h = t->h - y;
-    const u32 row = w * t->bpp;
-    if ((u64)row * h > DK_STAGING_SIZE) return;
+    if (x >= t->logical_w || y >= t->logical_h || !w || !h) return;
+    if (w > t->logical_w - x) w = t->logical_w - x;
+    if (h > t->logical_h - y) h = t->logical_h - y;
+    u32 px, py, pw, ph;
+    dk_scaled_rect(t, x, y, w, h, &px, &py, &pw, &ph);
+    const u32 row = pw * t->bpp;
+    if (!pw || !ph || (u64)row * ph > DK_STAGING_SIZE) return;
 
     DkImageView view;
     dkImageViewDefaults(&view, &t->image);
-    DkImageRect rect = { x, y, 0, w, h, 1 };
+    DkImageRect rect = { px, py, 0, pw, ph, 1 };
     DkCopyBuf dst = { dkMemBlockGetGpuAddr(s_dk.mem_staging), 0, 0 };
     dk_full_barrier();
     dkCmdBufCopyImageToBuffer(s_dk.cmd, &view, &rect, &dst, 0);
     dk_full_barrier();
     dk_submit_wait();
     /* Clean + invalidate, so the CPU reads what the GPU wrote. */
-    dkMemBlockFlushCpuCache(s_dk.mem_staging, 0, row * h);
+    dkMemBlockFlushCpuCache(s_dk.mem_staging, 0, row * ph);
     const u8* src = (const u8*)dkMemBlockGetCpuAddr(s_dk.mem_staging);
-    for (u32 r = 0; r < h; r++)
-        memcpy((u8*)out + (size_t)r * out_pitch, src + (size_t)r * row, row);
+    if (t->w == t->logical_w && t->h == t->logical_h) {
+        for (u32 r = 0; r < h; r++)
+            memcpy((u8*)out + (size_t)r * out_pitch, src + (size_t)r * row, row);
+        s_dk.st.readbacks++;
+        s_spk.readbacks++;
+        return;
+    }
+    for (u32 r = 0; r < h; r++) {
+        u32 sy = dk_scale_edge(y + r, t->logical_h, t->h);
+        if (sy < py) sy = py;
+        if (sy >= py + ph) sy = py + ph - 1;
+        for (u32 c = 0; c < w; c++) {
+            u32 sx = dk_scale_edge(x + c, t->logical_w, t->w);
+            if (sx < px) sx = px;
+            if (sx >= px + pw) sx = px + pw - 1;
+            memcpy((u8*)out + (size_t)r * out_pitch + (size_t)c * t->bpp,
+                   src + ((size_t)(sy - py) * pw + sx - px) * t->bpp, t->bpp);
+        }
+    }
     s_dk.st.readbacks++;
     s_spk.readbacks++;
 }
@@ -948,6 +1035,92 @@ static void dk_draw_fps_overlay(void)
     }
 }
 
+/* Compact 3x5 ASCII font for the Switch debug controls. */
+static unsigned dk_debug_glyph(char c)
+{
+    static const unsigned short digits[10] = {
+        0x7B6F, 0x2C97, 0x73E7, 0x73CF, 0x5BC9,
+        0x79CF, 0x79EF, 0x7249, 0x7BEF, 0x7BCF
+    };
+    static const char* letters[26] = {
+        "111101111101101", "110101110101110", "111100100100111",
+        "110101101101110", "111100110100111", "111100110100100",
+        "111100101101111", "101101111101101", "111010010010111",
+        "001001001101111", "101101110101101", "100100100100111",
+        "101111111101101", "101111111111101", "111101101101111",
+        "111101111100100", "111101101111011", "111101111110101",
+        "111100111001111", "111010010010010", "101101101101111",
+        "101101101101010", "101101111111101", "101101010101101",
+        "101101010010010", "111001010100111"
+    };
+    if (c >= '0' && c <= '9') return digits[c - '0'];
+    if (c >= 'A' && c <= 'Z') {
+        unsigned bits = 0;
+        for (int i = 0; i < 15; i++) bits = (bits << 1) | (letters[c - 'A'][i] == '1');
+        return bits;
+    }
+    if (c == '.') return 0x0002;
+    if (c == ':') return 0x0410;
+    if (c == '>') return 0x2212;
+    if (c == '-') return 0x01C0;
+    if (c == '+') return 0x05D0;
+    if (c == '/') return 0x1248;
+    return 0;
+}
+
+static void dk_debug_text(u32 x, u32 y, const char* str, u32 px,
+                          float red, float green, float blue)
+{
+    for (u32 ch = 0; str[ch]; ch++) {
+        unsigned glyph = dk_debug_glyph(str[ch]);
+        for (u32 r = 0; r < 5; r++) for (u32 col = 0; col < 3; col++) {
+            if (!(glyph & (1u << (14u - r * 3u - col)))) continue;
+            DkScissor b = { x + ch * 4u * px + col * px, y + r * px, px, px };
+            dkCmdBufSetScissors(s_dk.cmd, 0, &b, 1);
+            dkCmdBufClearColorFloat(s_dk.cmd, 0, DkColorMask_RGBA,
+                                    red, green, blue, 1.0f);
+        }
+    }
+}
+
+static void dk_draw_debug_menu(const SwitchDebugSettings* settings, u32 fps_x10,
+                               u32 frame_ms_x10)
+{
+    const u32 px = s_dk.width >= 1920 ? 4u : 3u;
+    const u32 x = 24u, y = 58u, line = 9u * px;
+    const u32 box_w = 220u * px, box_h = 110u * px;
+    DkScissor bg = { x, y, box_w, box_h };
+    dkCmdBufSetScissors(s_dk.cmd, 0, &bg, 1);
+    dkCmdBufClearColorFloat(s_dk.cmd, 0, DkColorMask_RGBA, 0.04f, 0.06f, 0.12f, 1.0f);
+    char label[80];
+    dk_debug_text(x + 3u * px, y + 3u * px, "DEBUG MENU", px, 0.2f, 1.0f, 0.4f);
+    dk_debug_text(x + 3u * px, y + 3u * px + line, "UP DOWN SELECT  LEFT RIGHT CHANGE  A ENTER  B CLOSE", px,
+                  0.7f, 0.8f, 1.0f);
+    const char* labels[5];
+    char scale[80], fps[80], ms[80];
+    snprintf(scale, sizeof scale, "RENDER SCALE: %d.%d  ACTIVE: %d.%d%s",
+             settings->scale_tenths / 10, settings->scale_tenths % 10,
+             settings->active_scale_tenths / 10, settings->active_scale_tenths % 10,
+             settings->scale_tenths != settings->active_scale_tenths ? "  REBOOT NEEDED" : "");
+    snprintf(fps, sizeof fps, "SHOW FPS: %s", settings->show_fps ? "ON" : "OFF");
+    snprintf(ms, sizeof ms, "SHOW FRAME MS: %s", settings->show_frame_ms ? "ON" : "OFF");
+    labels[0] = scale; labels[1] = fps; labels[2] = ms;
+    labels[3] = "REBOOT APPLICATION"; labels[4] = "CLOSE MENU";
+    for (int i = 0; i < 5; i++) {
+        u32 yy = y + 3u * px + (u32)(i + 3) * line;
+        dk_debug_text(x + 3u * px, yy, i == settings->selected ? ">" : " ", px,
+                      0.2f, 1.0f, 0.4f);
+        dk_debug_text(x + 8u * px, yy, labels[i], px, 1.0f, 1.0f, 1.0f);
+    }
+    snprintf(label, sizeof label, "PRESENT FPS: %u.%u  FRAME: %u.%u MS",
+             fps_x10 / 10u, fps_x10 % 10u, frame_ms_x10 / 10u, frame_ms_x10 % 10u);
+    dk_debug_text(x + 3u * px, y + 3u * px + 9u * line, label, px, 0.2f, 1.0f, 0.4f);
+    if (settings->reboot_error) {
+        snprintf(label, sizeof label, "REBOOT FAILED: %08X", (unsigned)settings->reboot_error);
+        dk_debug_text(x + 3u * px, y + 3u * px + 10u * line, label, px, 1.0f, 0.3f, 0.3f);
+    }
+}
+
 static void dk_tex_pend_collect(u32 done);   /* deferred texture release, below */
 static u32 s_present_serial;
 
@@ -1006,7 +1179,30 @@ static void be_present(void* user, u32 surface)
         dkCmdBufSetScissors(s_dk.cmd, 0, &sc, 1);
         dkCmdBufClearColorFloat(s_dk.cmd, 0, DkColorMask_RGBA, 0.0f, 0.0f, 0.0f, 1.0f);
     }
-    if (s_dk.fps_overlay) dk_draw_fps_overlay();
+    { static u64 last_present, window_start;
+      static u32 window_count, fps_x10, frame_ms_x10;
+      const u64 now = dk_now_us();
+      if (last_present) frame_ms_x10 = (u32)((now - last_present) / 100u);
+      last_present = now;
+      if (!window_start) window_start = now;
+      window_count++;
+      if (now - window_start >= 1000000u) {
+          fps_x10 = (u32)((u64)window_count * 10000000u / (now - window_start));
+          window_count = 0; window_start = now;
+      }
+      SwitchDebugSettings settings = switch_debug_snapshot();
+      if (settings.show_fps) dk_draw_fps_overlay();
+      if (settings.show_frame_ms) {
+          char ms[32];
+          const u32 px = s_dk.width >= 1920 ? 4u : 3u;
+          snprintf(ms, sizeof ms, "FRAME %u.%u MS", frame_ms_x10 / 10u, frame_ms_x10 % 10u);
+          DkScissor bg = { s_dk.width - 96u * px, 12u * px, 80u * px, 8u * px };
+          dkCmdBufSetScissors(s_dk.cmd, 0, &bg, 1);
+          dkCmdBufClearColorFloat(s_dk.cmd, 0, DkColorMask_RGBA, 0.0f, 0.0f, 0.0f, 1.0f);
+          dk_debug_text(bg.x + px, bg.y + px, ms, px, 0.2f, 1.0f, 0.2f);
+      }
+      if (settings.menu_open) dk_draw_debug_menu(&settings, fps_x10, frame_ms_x10);
+    }
     dk_full_barrier();
     s_dk.bound_dirty = 1;
     dk_submit_async();
@@ -1223,6 +1419,7 @@ static void be_texture_upload(void* user, u32 texture, u32 face, u32 mip, u32 w,
     (void)user;
     dk_target* t = dk_tex(texture);
     if (!t || !src || !row_bytes || !rows || face || mip >= t->mips || !w || !h) return;
+#ifdef DBZ3_DEKO_DIAG
     if (mip == 0 && t->block == 16 && w == 64 && h == 64) {   /* T23: ramp rows */
         static u32 nr = 0;
         if (nr++ < 24) {
@@ -1268,6 +1465,7 @@ static void be_texture_upload(void* user, u32 texture, u32 face, u32 mip, u32 w,
                             (u32)(sum[0] / cnt), (u32)(sum[1] / cnt), (u32)(sum[2] / cnt), (u32)(sum[3] / cnt));
         }
     }
+#endif
     /* A BC row is a row of 4x4 blocks; `rows` already counts them. */
     const u32 tight = t->block ? ((w + 3u) / 4u) * t->block : w * t->bpp;
     const u32 px_per_row = t->block ? 4u : 1u;
@@ -1408,14 +1606,17 @@ static int be_surface_blit(void* user, u32 src, u32 sx, u32 sy, u32 sw, u32 sh,
         return -1;
     const dk_target* S = &s_dk.surfaces[src];
     const dk_target* D = &s_dk.surfaces[dst];
-    if (S->fmt != D->fmt || sx + sw > S->w || sy + sh > S->h ||
-        dx + dw > D->w || dy + dh > D->h)
+    if (S->fmt != D->fmt || sx + sw > S->logical_w || sy + sh > S->logical_h ||
+        dx + dw > D->logical_w || dy + dh > D->logical_h)
         return -1;
+    u32 psx, psy, psw, psh, pdx, pdy, pdw, pdh;
+    dk_scaled_rect(S, sx, sy, sw, sh, &psx, &psy, &psw, &psh);
+    dk_scaled_rect(D, dx, dy, dw, dh, &pdx, &pdy, &pdw, &pdh);
     DkImageView sv, dv;
     dkImageViewDefaults(&sv, &S->image);
     dkImageViewDefaults(&dv, &D->image);
-    DkImageRect sr = { sx, sy, 0, sw, sh, 1 };
-    DkImageRect dr = { dx, dy, 0, dw, dh, 1 };
+    DkImageRect sr = { psx, psy, 0, psw, psh, 1 };
+    DkImageRect dr = { pdx, pdy, 0, pdw, pdh, 1 };
     dk_full_barrier();
     dkCmdBufBlitImage(s_dk.cmd, &sv, &sr, &dv, &dr, DkBlitFlag_ModeBlit, 0);
     dk_full_barrier();
@@ -1638,6 +1839,8 @@ static void be_pipeline_release(void* user, u32 pipeline)
     (void)user;
     if (!pipeline || pipeline > DK_MAX_PIPES) return;
     s_dk.pipes[pipeline - 1].used = 0;
+    if (s_dk.recorded.pipeline_valid && s_dk.recorded.pipeline == pipeline)
+        s_dk.recorded.pipeline_valid = 0;
     if (s_dk.draw.pipe == pipeline) s_dk.draw.pipe = 0;
 }
 
@@ -1770,6 +1973,7 @@ static void be_draw(void* user, rsx_topology topology, const void* vertices,
     }
     if (samples_target)
         dkCmdBufBarrier(s_dk.cmd, DkBarrier_Fragments, DkInvalidateFlags_Image);
+#ifdef DBZ3_DEKO_DIAG
     { static u32 n = 0;   /* T23: which textures the model draws sample */
       if (P->vs_hash == 0x3c48ee42ce65b498ull || P->vs_hash == 0x955f3911a36b6d89ull ||
           P->vs_hash == 0x05bf97857ab9760aull) {
@@ -1816,48 +2020,75 @@ static void be_draw(void* user, rsx_topology topology, const void* vertices,
                      b->wrap_s, b->wrap_t, b->wrap_r, b->min_lod, b->max_lod);
           }
       } }
+#endif
 
-    if (s_dk.bound_dirty) dk_rebind_targets();
+    if (s_dk.bound_dirty) {
+        dk_rebind_targets();
+        s_dk.recorded.scissor_valid = 0;
+    }
 
     DkCmdBuf cb = s_dk.cmd;
-    DkShader const* sh[2] = { &s_dk.shaders[P->vs], &s_dk.shaders[P->ps] };
-    dkCmdBufBindShaders(cb, DkStageFlag_GraphicsMask, sh, 2);
-    dkCmdBufBindRasterizerState(cb, &P->ras);
-    dkCmdBufBindColorState(cb, &P->color);
-    dkCmdBufBindColorWriteState(cb, &P->cwrite);
-    for (u32 r = 0; r < P->rt_count; r++) dkCmdBufBindBlendState(cb, r, &P->blend);
-    dkCmdBufBindDepthStencilState(cb, &P->ds);
-    if (P->ds.stencilTestEnable)
+    const int pipeline_changed = !s_dk.recorded.pipeline_valid || s_dk.recorded.pipeline != pipe;
+    if (pipeline_changed) {
+        DkShader const* sh[2] = { &s_dk.shaders[P->vs], &s_dk.shaders[P->ps] };
+        dkCmdBufBindShaders(cb, DkStageFlag_GraphicsMask, sh, 2);
+        dkCmdBufBindRasterizerState(cb, &P->ras);
+        dkCmdBufBindColorState(cb, &P->color);
+        dkCmdBufBindColorWriteState(cb, &P->cwrite);
+        for (u32 r = 0; r < P->rt_count; r++) dkCmdBufBindBlendState(cb, r, &P->blend);
+        dkCmdBufBindDepthStencilState(cb, &P->ds);
+        dkCmdBufBindVtxAttribState(cb, P->attr, P->nattr);
+        s_dk.recorded.pipeline = pipe;
+        s_dk.recorded.pipeline_valid = 1;
+    }
+    if (pipeline_changed || s_dk.recorded.vertex_stride != stride) {
+        DkVtxBufferState vbs = { stride, 0 };
+        dkCmdBufBindVtxBufferState(cb, &vbs, 1);
+        s_dk.recorded.vertex_stride = stride;
+    }
+    if (P->ds.stencilTestEnable &&
+        (pipeline_changed || s_dk.recorded.stencil_ref != s_dk.draw.stencil_ref))
         dkCmdBufSetStencil(cb, DkFace_FrontAndBack, P->s_write_mask,
                            (u8)(s_dk.draw.stencil_ref & 0xFFu), P->s_func_mask);
+    s_dk.recorded.stencil_ref = s_dk.draw.stencil_ref;
     dkCmdBufBindUniformBuffer(cb, DkStage_Vertex, 0, gpu + vsoff,
                               (vsb + 15u) & ~15u);
     dkCmdBufBindUniformBuffer(cb, DkStage_Fragment, 1, gpu + psoff,
                               (psb + 15u) & ~15u);
-    dkCmdBufBindTextures(cb, DkStage_Fragment, 0, th, 16);
-    dkCmdBufBindVtxAttribState(cb, P->attr, P->nattr);
-    DkVtxBufferState vbs = { stride, 0 };
-    dkCmdBufBindVtxBufferState(cb, &vbs, 1);
+    if (!s_dk.recorded.textures_valid || memcmp(s_dk.recorded.textures, th, sizeof th)) {
+        dkCmdBufBindTextures(cb, DkStage_Fragment, 0, th, 16);
+        memcpy(s_dk.recorded.textures, th, sizeof th);
+        s_dk.recorded.textures_valid = 1;
+    }
     dkCmdBufBindVtxBuffer(cb, 0, gpu + voff, vbytes);
 
     DkViewport vp = { 0.0f, 0.0f, (float)T->w, (float)T->h, 0.0f, 1.0f };
     if (s_dk.draw.have_vp && s_dk.draw.vp[2] > 0.0f && s_dk.draw.vp[3] > 0.0f) {
-        vp.x = s_dk.draw.vp[0]; vp.y = s_dk.draw.vp[1];
-        vp.width = s_dk.draw.vp[2]; vp.height = s_dk.draw.vp[3];
+        const float sx = (float)T->w / (float)T->logical_w;
+        const float sy = (float)T->h / (float)T->logical_h;
+        vp.x = s_dk.draw.vp[0] * sx; vp.y = s_dk.draw.vp[1] * sy;
+        vp.width = s_dk.draw.vp[2] * sx; vp.height = s_dk.draw.vp[3] * sy;
     }
-    dkCmdBufSetViewports(cb, 0, &vp, 1);
+    if (!s_dk.recorded.viewport_valid || memcmp(&s_dk.recorded.viewport, &vp, sizeof vp)) {
+        dkCmdBufSetViewports(cb, 0, &vp, 1);
+        s_dk.recorded.viewport = vp;
+        s_dk.recorded.viewport_valid = 1;
+    }
     DkScissor sc = { 0, 0, T->w, T->h };
     if (s_dk.draw.have_sc) {
-        u32 x0 = s_dk.draw.sc[0] < T->w ? s_dk.draw.sc[0] : T->w;
-        u32 y0 = s_dk.draw.sc[1] < T->h ? s_dk.draw.sc[1] : T->h;
-        u32 x1 = s_dk.draw.sc[0] + s_dk.draw.sc[2], y1 = s_dk.draw.sc[1] + s_dk.draw.sc[3];
-        if (x1 > T->w) x1 = T->w;
-        if (y1 > T->h) y1 = T->h;
+        u32 x0, y0, rw, rh;
+        dk_scaled_rect(T, s_dk.draw.sc[0], s_dk.draw.sc[1],
+                       s_dk.draw.sc[2], s_dk.draw.sc[3], &x0, &y0, &rw, &rh);
+        u32 x1 = x0 + rw, y1 = y0 + rh;
         sc.x = x0; sc.y = y0;
         sc.width = x1 > x0 ? x1 - x0 : 0;
         sc.height = y1 > y0 ? y1 - y0 : 0;
     }
-    dkCmdBufSetScissors(cb, 0, &sc, 1);
+    if (!s_dk.recorded.scissor_valid || memcmp(&s_dk.recorded.scissor, &sc, sizeof sc)) {
+        dkCmdBufSetScissors(cb, 0, &sc, 1);
+        s_dk.recorded.scissor = sc;
+        s_dk.recorded.scissor_valid = 1;
+    }
 
     const DkPrimitive prim = dk_prim(topology);
     if (ibytes) {
@@ -1949,6 +2180,7 @@ static void dk_destroy_all(void)
 
 static int dk_init_device(u32 width, u32 height)
 {
+    switch_debug_init();
     s_dk.width = width;
     s_dk.height = height;
 
@@ -2040,9 +2272,6 @@ static int dk_init_device(u32 width, u32 height)
     DkSwapchainMaker sm;
     dkSwapchainMakerDefaults(&sm, s_dk.device, nwindowGetDefault(), imgs, DK_NUM_SWAP);
     s_dk.swapchain = dkSwapchainCreate(&sm);
-    { FILE* off = fopen("sdmc:/switch/dbz-budokai-3-switch/fps-off", "r");
-      s_dk.fps_overlay = !off;
-      if (off) fclose(off); }
     if (!s_dk.swapchain) { dk_log("dkSwapchainCreate failed\n"); return -1; }
 
     /* Start on a defined black frame. */

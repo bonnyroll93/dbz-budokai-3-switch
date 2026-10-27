@@ -46,12 +46,20 @@ def main() -> None:
                  "        ctx->gpr[6] = vm_read32(ctx->gpr[4] + 0x0);",
                  "        ctx->gpr[29] = ppc_rldicl(ctx->gpr[29], 0, 32);\n"
                  "        if ((uint32_t)ctx->gpr[29] < 0x10000u ||\n"
-                 "            (uint32_t)ctx->gpr[29] >= 0x80000000u) goto loc_00031F08;\n"
+                 "            (uint32_t)ctx->gpr[29] >= 0x80000000u ||\n"
+                 "            ((uint32_t)ctx->gpr[29] & 3u)) goto loc_00031F08;\n"
                  "        ctx->gpr[6] = vm_read32(ctx->gpr[4] + 0x0);")
     replace_once(chunk0,
                  "        ctx->gpr[30] = vm_read32(ctx->gpr[29] + 0x14);\n"
                  "        ctx->ctr = (uint32_t)ctx->gpr[6];",
                  "        ctx->gpr[30] = vm_read32(ctx->gpr[29] + 0x14);\n"
+                 "        if ((uint32_t)ctx->gpr[30] & 3u) {\n"
+                 "            static unsigned misaligned_reports = 0;\n"
+                 "            if (misaligned_reports++ < 8u)\n"
+                 "                fprintf(stderr, \"[dbz3] misaligned object ptr=0x%08X owner=0x%08X lr=0x%08X\\n\",\n"
+                 "                        (uint32_t)ctx->gpr[30], (uint32_t)ctx->gpr[29], (uint32_t)ctx->lr);\n"
+                 "            goto loc_00031F08;\n"
+                 "        }\n"
                  "        if ((uint32_t)ctx->gpr[30] < 0x10000u ||\n"
                  "            (uint32_t)ctx->gpr[30] >= 0x80000000u) goto loc_00031F08;\n"
                  "        ctx->ctr = (uint32_t)ctx->gpr[6];")

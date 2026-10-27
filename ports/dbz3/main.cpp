@@ -223,15 +223,17 @@ static int switch_rsx_backend_pump(void)
  * ticks behind it paces the whole game behind it. */
 static volatile LONG g_frames_presented = 0;
 
-static uint64_t frame_now_ms(void)
+static uint64_t frame_now_us(void)
 {
 #ifdef _WIN32
     const Ps3Platform *platform = ps3_platform_win32();
-    return platform->time.monotonic_us(platform->time.context) / 1000;
+    return platform->time.monotonic_us(platform->time.context);
 #else
-    return GetTickCount64();
+    return GetTickCount64() * 1000ull;
 #endif
 }
+
+static uint64_t frame_now_ms(void) { return frame_now_us() / 1000ull; }
 
 static void frame_sleep_ms(uint32_t milliseconds)
 {
@@ -278,15 +280,16 @@ static DWORD WINAPI frame_clock(LPVOID)
 #endif
 
     unsigned  last_flip = 0;
-    uint64_t next_tick = frame_now_ms();
+    uint64_t next_tick_us = frame_now_us();
+    unsigned tick_remainder = 0;
 #ifdef __SWITCH__
-    const uint64_t frame_start_ms = next_tick;
+    const uint64_t frame_start_ms = next_tick_us / 1000ull;
     FILE* clock_diag = fopen("sdmc:/switch/dbz-budokai-3-switch/t21-clock.log", "w");
     FILE* heartbeat_diag = fopen("sdmc:/switch/dbz-budokai-3-switch/t21-heartbeat.log", "w");
     FILE* stall_diag = fopen("sdmc:/switch/dbz-budokai-3-switch/t21-stall.log", "w");
-    uint64_t clock_window_start = next_tick;
-    uint64_t heartbeat_previous_ms = next_tick;
-    uint64_t last_progress_ms = next_tick, last_stall_report_ms = 0;
+    uint64_t clock_window_start = frame_start_ms;
+    uint64_t heartbeat_previous_ms = frame_start_ms;
+    uint64_t last_progress_ms = frame_start_ms, last_stall_report_ms = 0;
     unsigned last_progress_frames = 0;
     uint64_t tick_ms = 0, fifo_ms = 0, present_ms = 0, sleep_ms = 0;
     uint64_t fifo_cpu_ns = 0, fifo_max_ms = 0, sleep_max_ms = 0;
@@ -337,10 +340,11 @@ static DWORD WINAPI frame_clock(LPVOID)
         if (sleep_elapsed > sleep_max_ms) sleep_max_ms = sleep_elapsed;
         ++sleep_calls;
 #endif
-        uint64_t now = frame_now_ms();
+        uint64_t now_us = frame_now_us();
+        uint64_t now = now_us / 1000ull;
 
         int fired = 0;
-        while ((long long)(now - next_tick) >= 0 && fired < 240) {
+        while ((int64_t)(now_us - next_tick_us) >= 0 && fired < 240) {
 #ifdef __SWITCH__
             section_start = frame_now_ms();
 #endif
@@ -372,10 +376,12 @@ static DWORD WINAPI frame_clock(LPVOID)
                 cellGcm_rsx_process_fifo();
 #endif
             }
-            next_tick += 16;             /* ~60 Hz */
+            next_tick_us += 1000000u / 60u;
+            tick_remainder += 1000000u % 60u;
+            if (tick_remainder >= 60u) { ++next_tick_us; tick_remainder -= 60u; }
             fired++;
         }
-        if (fired >= 240) next_tick = now;   /* fell too far behind -- resync */
+        if (fired >= 240) { next_tick_us = now_us; tick_remainder = 0; }
 
         /* Drain at the outer cadence too, not only on the 16 ms tick: titles
          * fence every render pass on a label the drain writes, and one wave of
@@ -705,6 +711,7 @@ int main(int argc, char** argv)
     fprintf(stderr, "[build] compiled %s %s\n", __DATE__, __TIME__);
     /* A run stopping before a subsystem starts must not inherit its old log. */
     const char* boot_logs[] = {"t21-frames.log", "t21-spu-hot.log", "t21-input.log",
+        "t21-input-queue.log",
         "t21-clock.log", "t21-heartbeat.log", "t21-stall.log", "t21-spu-cpu.log", "t21-spu-schedule.log",
         "t21-spu-wake.log",
         "t21-guest-cpu.log", "t20-pixels.log"};

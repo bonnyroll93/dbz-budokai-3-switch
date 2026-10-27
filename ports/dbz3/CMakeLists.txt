@@ -153,6 +153,18 @@ message(STATUS "Lifted sources:  ${RECOMP_SOURCE_COUNT} file(s)")
 # different reason. add_subdirectory hands all of that over with the target.
 add_subdirectory("${PS3RECOMP_DIR}" "${CMAKE_BINARY_DIR}/ps3recomp_sdk"
                  EXCLUDE_FROM_ALL)
+option(PORT_DBZ3_DEKO_DIAG "Enable detailed deko3d texture and draw diagnostics" OFF)
+if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" AND PORT_DBZ3_DEKO_DIAG)
+    set_property(SOURCE "${PS3RECOMP_DIR}/libs/video/rsx_deko3d_backend.c"
+        TARGET_DIRECTORY ps3recomp_runtime APPEND PROPERTY
+        COMPILE_DEFINITIONS DBZ3_DEKO_DIAG=1)
+endif()
+option(PORT_SWITCH_INPUT_QUEUE_PROFILE "Measure Switch input queue age and depth" OFF)
+if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" AND PORT_SWITCH_INPUT_QUEUE_PROFILE)
+    set_property(SOURCE "${PS3RECOMP_DIR}/runtime/platform/switch_input.c"
+        TARGET_DIRECTORY ps3recomp_runtime APPEND PROPERTY
+        COMPILE_DEFINITIONS PORT_SWITCH_INPUT_QUEUE_PROFILE=1)
+endif()
 
 # ---------------------------------------------------------------------------
 # The HLE NID table
@@ -347,6 +359,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
         # find the update/draw split for "2 logic steps per drawn frame".
         option(PORT_DBZ3_LOOP_PROF "Profile DBZ3 main loop steps" ON)
         if(PORT_DBZ3_LOOP_PROF)
+            option(PORT_DBZ3_LEVEL_FUNCTION_PROFILE "Time func_00030790 during the level task" OFF)
+            if(PORT_DBZ3_LEVEL_FUNCTION_PROFILE)
+                target_compile_definitions(${PROJECT_NAME} PRIVATE PORT_DBZ3_LEVEL_FUNCTION_PROFILE=1)
+            endif()
             target_sources(${PROJECT_NAME} PRIVATE dbz3_loop_prof.cpp)
             # A4: CRI -> surround-mixer output trace (t27-adx.log).
             target_sources(${PROJECT_NAME} PRIVATE dbz3_audio_trace.cpp)

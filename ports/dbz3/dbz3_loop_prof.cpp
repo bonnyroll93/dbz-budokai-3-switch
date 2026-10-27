@@ -108,6 +108,9 @@ struct Window {
     uint64_t rd_runs, rd_rolled, rd_kb, rd_noroom, rd_flushed, rd_wrapped;  /* T44 */
     uint64_t du_phase_runs[2][3], du_phase_us[2][3], du_phase_gcm[2][3];
     uint64_t du_render_skipped;
+#ifdef PORT_DBZ3_LEVEL_FUNCTION_PROFILE
+    uint64_t level30790_calls, level30790_ticks, level30790_max_ticks;
+#endif
 };
 
 Window g_w;
@@ -186,6 +189,14 @@ void flush(uint64_t now)
         }
         fprintf(g_log, "  du-render-skipped=%llu\n",
                 (unsigned long long)g_w.du_render_skipped);
+#ifdef PORT_DBZ3_LEVEL_FUNCTION_PROFILE
+        fprintf(g_log, "  level30790 calls=%llu total_us=%llu avg_us=%.1f max_us=%llu\n",
+                (unsigned long long)g_w.level30790_calls,
+                (unsigned long long)lp_us(g_w.level30790_ticks),
+                g_w.level30790_calls ?
+                    (double)g_w.level30790_ticks / (double)g_w.level30790_calls / 19.2 : 0.0,
+                (unsigned long long)lp_us(g_w.level30790_max_ticks));
+#endif
         fprintf(g_log, "  tasks passes=%llu\n", (unsigned long long)g_w.task_passes);
         for (int i = 0; i < kMaxTasks && g_w.tasks[i].fn; ++i) {
             const TaskStat& t = g_w.tasks[i];
@@ -522,6 +533,18 @@ void record_task(uint32_t fn, uint32_t task, uint32_t order, uint64_t us,
 }
 
 } // namespace
+
+#ifdef PORT_DBZ3_LEVEL_FUNCTION_PROFILE
+extern "C" uint64_t dbz3_level30790_begin(void) { return lp_ticks(); }
+extern "C" void dbz3_level30790_end(uint64_t start)
+{
+    if (g_dbz3_cur_task_fn != 0x001D1604u) return;
+    const uint64_t ticks = lp_ticks() - start;
+    g_w.level30790_calls++;
+    g_w.level30790_ticks += ticks;
+    if (ticks > g_w.level30790_max_ticks) g_w.level30790_max_ticks = ticks;
+}
+#endif
 
 /* One wrapper per callee; the lifted original is __real__Z13func_XXXXXXXX.
  * Only calls made by the main loop count (main sets ctx->lr to the return
