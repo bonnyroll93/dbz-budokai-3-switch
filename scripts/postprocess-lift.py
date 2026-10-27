@@ -40,6 +40,7 @@ def main() -> None:
     parser.add_argument("includes", type=pathlib.Path)
     args = parser.parse_args()
     chunk0 = args.recompiled / "ppu_recomp_000.cpp"
+    chunk3 = args.recompiled / "ppu_recomp_003.cpp"
     chunk4 = args.recompiled / "ppu_recomp_004.cpp"
     replace_once(chunk0,
                  "        ctx->gpr[29] = ppc_rldicl(ctx->gpr[29], 0, 32);\n"
@@ -72,6 +73,40 @@ def main() -> None:
                  "extern \"C\" int g_t23_postfx_nowait;\n"
                  "void func_002909C0(ppu_context* ctx) {\n"
                  "        if (g_t23_postfx_nowait) return;")
+    # DU effects list: Namek crash 0x2F41A00C is a read at node+0xC,
+    # where node=0x2F41A000 came from (ctx->gpr[30]+0x14)+0x20.
+    # That address is in the unmapped RSX control window. Skip only a bad
+    # effects node and retain the surrounding scene/task progression.
+    replace_once(chunk3, "void func_001D1EC0(ppu_context* ctx) {",
+                 "static inline bool dbz3_du_effect_node_valid(uint32_t p) {\n"
+                 "    return (p >= 0x10000u && p <= 0x1FFFFFCCu) ||\n"
+                 "           (p >= 0x30000000u && p <= 0xDFFFFFCCu);\n"
+                 "}\n"
+                 "void func_001D1EC0(ppu_context* ctx) {")
+    replace_once(chunk3,
+                 "        ctx->gpr[28] = vm_read32(ctx->gpr[4] + 0x20);\n"
+                 "        ctx->lr = 0x001D23E0; func_0001D954(ctx);",
+                 "        ctx->gpr[28] = vm_read32(ctx->gpr[4] + 0x20);\n"
+                 "        if (ctx->gpr[28] && !dbz3_du_effect_node_valid((uint32_t)ctx->gpr[28])) {\n"
+                 "            static unsigned bad_nodes = 0;\n"
+                 "            if (bad_nodes++ < 8u) fprintf(stderr, \"[du-effect] invalid first node=0x%08X owner=0x%08X\\n\",\n"
+                 "                                         (uint32_t)ctx->gpr[28], (uint32_t)ctx->gpr[4]);\n"
+                 "            goto loc_001D24F4;\n"
+                 "        }\n"
+                 "        ctx->lr = 0x001D23E0; func_0001D954(ctx);")
+    replace_once(chunk3,
+                 "loc_001D24E8:\n"
+                 "        ctx->gpr[28] = vm_read32(ctx->gpr[28] + 0x0);\n"
+                 "        { int64_t a = (int32_t)ctx->gpr[28];",
+                 "loc_001D24E8:\n"
+                 "        ctx->gpr[28] = vm_read32(ctx->gpr[28] + 0x0);\n"
+                 "        if (ctx->gpr[28] && !dbz3_du_effect_node_valid((uint32_t)ctx->gpr[28])) {\n"
+                 "            static unsigned bad_links = 0;\n"
+                 "            if (bad_links++ < 8u) fprintf(stderr, \"[du-effect] invalid next node=0x%08X\\n\",\n"
+                 "                                         (uint32_t)ctx->gpr[28]);\n"
+                 "            goto loc_001D24F4;\n"
+                 "        }\n"
+                 "        { int64_t a = (int32_t)ctx->gpr[28];")
     make_include(args.recompiled / "ppu_recomp_003.cpp", ("00216DB4",),
                  args.includes / "dbz3_crierr_lifted.inc")
     make_include(chunk0, ("0001D294", "0001D4D8"),

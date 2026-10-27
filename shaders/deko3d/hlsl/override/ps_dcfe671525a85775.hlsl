@@ -28,6 +28,7 @@ PSOutput main(PSInput input) {
     { float4 _v = (float4)((abs((r[2]).xyzw) > 0.0 ? ((r[2]).xyzw) / sqrt(abs(((r[2]).wwww).x)) : (float4)0.0)); r[2].xyz = _v.xyz; }
     { float4 _v = (float4)((fp_constants[2]).xxxx); r[2].w = _v.w; }
     { float4 _v = (float4)(dot(((r[0]).xzww).xyz, ((r[2]).xyzw).xyz)); r[2].x = _v.x; }
+    float t28_ndv = r[2].x;
     { float4 _v = (float4)((fp_constants[3]).xxxx); r[3].w = _v.w; }
     { float4 _v = (float4)((-(abs((r[2]).xyzw))) + ((fp_constants[4]).xxxx)); r[0].x = _v.x; }
     { float4 _v = (float4)(((r[0]).yyyy) + ((fp_constants[5]).yyyy)); r[3].z = _v.z; }
@@ -58,6 +59,10 @@ PSOutput main(PSInput input) {
      * off-screen control-flow workaround used by ps_511e3e7252f5f9dc. */
     if (input.position.x >= 1.0e9) r[1].x = 0.0;
     { float4 _v = (float4)(((r[0]).xyzw) + ((r[1]).xxxx)); r[0].xyzw = _v.xyzw; }
+    if (input.position.x >= 2.0e9 && input.position.x < 3.0e9)
+        r[0] = float4(abs(t28_ndv).xxx, 1.0);
+    else if (input.position.x >= 4.0e9 && input.position.x < 5.0e9)
+        r[0] = float4(saturate(abs(input.tc1.w - 1.0) * 4.0), saturate(input.tc2.w), 0.0, 1.0);
     { float4 _v = (float4)((-((r[0]).xyzw)) + ((fp_constants[13]).xyzw)); r[1].xyz = _v.xyz; }
     { float4 _v = (float4)(((r[2]).xxxx) * ((r[1]).xyzw) + ((r[0]).xyzw)); r[0].xyz = _v.xyz; }
     { float4 _v = (float4)((r[0]).xyzw); r[0].w = _v.w; }

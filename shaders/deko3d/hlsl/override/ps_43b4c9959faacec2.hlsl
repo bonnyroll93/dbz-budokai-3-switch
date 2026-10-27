@@ -19,10 +19,6 @@ PSOutput main(PSInput input) {
     [unroll] for (int _i = 0; _i < 48; _i++) { r[_i] = (float4)0; h[_i] = (float4)0; }
     float4 cc0 = (float4)0; float4 cc1 = (float4)0;
     { float4 _v = (float4)(rsx_tex[1].Sample(rsx_samp[1], ((input.tc0).xyzw).xy)); r[0].xyz = _v.xyz; }
-    /* The half-resolution mask also covers land at the shoreline. Keep its
-     * original blue channel before the displacement calculation overwrites
-     * r[0].z, so terrain cannot be displaced by neighboring water samples. */
-    float water_at_pixel = r[0].z;
     { float4 _v = (float4)(((r[0]).xxxx) * ((fp_constants[0]).xxxx)); r[0].w = _v.w; }
     { float4 _v = (float4)(((r[0]).xyzw) + ((fp_constants[1]).yyyy)); r[0].xy = _v.xy; }
     { float4 _v = (float4)(((r[0]).xyzw) * ((r[0]).zzzz)); r[0].w = _v.w; }
@@ -42,7 +38,10 @@ PSOutput main(PSInput input) {
     { float4 _v = (float4)(min(((r[1]).wwww), ((r[1]).zzzz))); r[1].x = _v.x; }
     { float4 _v = (float4)((float4)(((r[1]).xyzw) >= ((fp_constants[3]).wwww))); h[2].x = _v.x; }
     { float4 _v = (float4)(((r[0]).xyzw) * ((h[2]).xxxx) + ((r[0]).zwzz)); r[0].xy = _v.xy; }
-    { float2 scene_uv = water_at_pixel >= 0.5 ? r[0].xy : input.tc0.xy;
+    /* Depth for the mask is unavailable in the deko3d backend. Until it is
+     * supplied, refraction displaces the coastline and character too. Keep
+     * the scene-color copy so the rest of the water rendering remains. */
+    { float2 scene_uv = input.tc0.xy;
       float4 _v = (float4)(rsx_tex[0].Sample(rsx_samp[0], scene_uv)); r[0].xyzw = _v.xyzw; }
     PSOutput _out;
     float4 _o0 = r[0];
