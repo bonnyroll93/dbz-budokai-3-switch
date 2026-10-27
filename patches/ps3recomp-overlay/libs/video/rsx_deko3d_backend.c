@@ -41,6 +41,12 @@
 #include <malloc.h>
 
 void ps3_switch_resource_report(const char *tag);
+/* Optional port hook: screenshots and MJPEG capture are kept out of the
+ * renderer and are called only for a requested frame. */
+extern int dbz3_capture_wants_frame(uint64_t now_us) __attribute__((weak));
+extern void dbz3_capture_frame(const uint8_t *rgba, unsigned width,
+                               unsigned height, unsigned pitch,
+                               uint64_t now_us) __attribute__((weak));
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1088,7 +1094,7 @@ static void dk_draw_debug_menu(const SwitchDebugSettings* settings, u32 fps_x10,
 {
     const u32 px = s_dk.width >= 1920 ? 4u : 3u;
     const u32 x = 24u, y = 58u, line = 9u * px;
-    const u32 box_w = 220u * px, box_h = 110u * px;
+    const u32 box_w = 220u * px, box_h = 135u * px;
     DkScissor bg = { x, y, box_w, box_h };
     dkCmdBufSetScissors(s_dk.cmd, 0, &bg, 1);
     dkCmdBufClearColorFloat(s_dk.cmd, 0, DkColorMask_RGBA, 0.04f, 0.06f, 0.12f, 1.0f);
@@ -1096,7 +1102,7 @@ static void dk_draw_debug_menu(const SwitchDebugSettings* settings, u32 fps_x10,
     dk_debug_text(x + 3u * px, y + 3u * px, "DEBUG MENU", px, 0.2f, 1.0f, 0.4f);
     dk_debug_text(x + 3u * px, y + 3u * px + line, "UP DOWN SELECT  LEFT RIGHT CHANGE  A ENTER  B CLOSE", px,
                   0.7f, 0.8f, 1.0f);
-    const char* labels[5];
+    const char* labels[7];
     char scale[80], fps[80], ms[80];
     snprintf(scale, sizeof scale, "RENDER SCALE: %d.%d  ACTIVE: %d.%d%s",
              settings->scale_tenths / 10, settings->scale_tenths % 10,
@@ -1105,8 +1111,10 @@ static void dk_draw_debug_menu(const SwitchDebugSettings* settings, u32 fps_x10,
     snprintf(fps, sizeof fps, "SHOW FPS: %s", settings->show_fps ? "ON" : "OFF");
     snprintf(ms, sizeof ms, "SHOW FRAME MS: %s", settings->show_frame_ms ? "ON" : "OFF");
     labels[0] = scale; labels[1] = fps; labels[2] = ms;
-    labels[3] = "REBOOT APPLICATION"; labels[4] = "CLOSE MENU";
-    for (int i = 0; i < 5; i++) {
+    labels[3] = "SAVE SCREENSHOT";
+    labels[4] = settings->recording ? "STOP SCREEN RECORDING" : "START SCREEN RECORDING";
+    labels[5] = "REBOOT APPLICATION"; labels[6] = "CLOSE MENU";
+    for (int i = 0; i < 7; i++) {
         u32 yy = y + 3u * px + (u32)(i + 3) * line;
         dk_debug_text(x + 3u * px, yy, i == settings->selected ? ">" : " ", px,
                       0.2f, 1.0f, 0.4f);
@@ -1114,15 +1122,17 @@ static void dk_draw_debug_menu(const SwitchDebugSettings* settings, u32 fps_x10,
     }
     snprintf(label, sizeof label, "PRESENT FPS: %u.%u  FRAME: %u.%u MS",
              fps_x10 / 10u, fps_x10 % 10u, frame_ms_x10 / 10u, frame_ms_x10 % 10u);
-    dk_debug_text(x + 3u * px, y + 3u * px + 9u * line, label, px, 0.2f, 1.0f, 0.4f);
+    dk_debug_text(x + 3u * px, y + 3u * px + 11u * line, label, px, 0.2f, 1.0f, 0.4f);
     if (settings->reboot_error) {
         snprintf(label, sizeof label, "REBOOT FAILED: %08X", (unsigned)settings->reboot_error);
-        dk_debug_text(x + 3u * px, y + 3u * px + 10u * line, label, px, 1.0f, 0.3f, 0.3f);
+        dk_debug_text(x + 3u * px, y + 3u * px + 12u * line, label, px, 1.0f, 0.3f, 0.3f);
     }
 }
 
 static void dk_tex_pend_collect(u32 done);   /* deferred texture release, below */
 static u32 s_present_serial;
+static u8 *s_capture_pixels;
+static size_t s_capture_capacity;
 
 static void be_present(void* user, u32 surface)
 {
@@ -1149,14 +1159,41 @@ static void be_present(void* user, u32 surface)
                  (unsigned)s_dk.st.tex_made, (unsigned)s_dk.st.tex_fail);
       } }
     const u64 t0 = dk_now_us();
+    const int have_src = surface && surface <= DK_MAX_SURFACES &&
+                         s_dk.surfaces[surface].used &&
+                         s_dk.surfaces[surface].fmt == RSX_BE_FMT_R8G8B8A8;
+    if (have_src && dbz3_capture_wants_frame && dbz3_capture_frame &&
+        dbz3_capture_wants_frame(t0)) {
+        dk_target *t = &s_dk.surfaces[surface];
+        const size_t bytes = (size_t)t->logical_w * t->logical_h * 4u;
+        if (t->logical_w && t->logical_h && t->w && t->h && bytes <= (16u << 20)) {
+            if (bytes > s_capture_capacity) {
+                u8 *pixels = (u8 *)realloc(s_capture_pixels, bytes);
+                if (pixels) { s_capture_pixels = pixels; s_capture_capacity = bytes; }
+            }
+            if (s_capture_capacity >= bytes) {
+                const u32 pitch = t->logical_w * 4u;
+                if ((u64)t->w * t->h * 4u <= DK_STAGING_SIZE) {
+                    be_readback(user, surface, 0, 0, t->logical_w, t->logical_h,
+                                s_capture_pixels, pitch);
+                } else {
+                    /* Docked 1080p can exceed the shared 8 MiB staging block. */
+                    for (u32 y = 0; y < t->logical_h; y += 128u) {
+                        const u32 h = t->logical_h - y < 128u ? t->logical_h - y : 128u;
+                        be_readback(user, surface, 0, y, t->logical_w, h,
+                                    s_capture_pixels + (size_t)y * pitch, pitch);
+                    }
+                }
+                dbz3_capture_frame(s_capture_pixels, t->logical_w, t->logical_h,
+                                   pitch, t0);
+            }
+        }
+    }
     const int slot = dkQueueAcquireImage(s_dk.queue, s_dk.swapchain);
     if (slot < 0 || slot >= DK_NUM_SWAP) { s_dk.st.acquire_fail++; return; }
 
     DkImageView dst;
     dkImageViewDefaults(&dst, &s_dk.swap_images[slot]);
-    const int have_src = surface && surface <= DK_MAX_SURFACES &&
-                         s_dk.surfaces[surface].used &&
-                         s_dk.surfaces[surface].fmt == RSX_BE_FMT_R8G8B8A8;
     DkImageView const* dsts[1] = { &dst };
     if (have_src) {
         dk_target* t = &s_dk.surfaces[surface];

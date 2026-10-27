@@ -100,6 +100,19 @@ def main() -> None:
                  "            goto loc_001D24F4;\n"
                  "        }\n"
                  "        ctx->lr = 0x001D23E0; func_0001D954(ctx);")
+    # A valid effects node can still contain an offset that computes an
+    # unmapped address. run39 faults at 0x3D3155D8 in this exact read.
+    replace_once(chunk3,
+                 "        ctx->gpr[3] = vm_read32(ctx->gpr[5] + 0x0);\n"
+                 "        ctx->lr = 0x001D242C;",
+                 "        if (!dbz3_du_effect_node_valid((uint32_t)ctx->gpr[5])) {\n"
+                 "            static unsigned bad_derived = 0;\n"
+                 "            if (bad_derived++ < 8u) fprintf(stderr, \"[du-effect] invalid derived=0x%08X node=0x%08X index=0x%08X\\n\",\n"
+                 "                                              (uint32_t)ctx->gpr[5], (uint32_t)ctx->gpr[28], (uint32_t)ctx->gpr[6]);\n"
+                 "            goto loc_001D24E8;\n"
+                 "        }\n"
+                 "        ctx->gpr[3] = vm_read32(ctx->gpr[5] + 0x0);\n"
+                 "        ctx->lr = 0x001D242C;")
     replace_once(chunk3,
                  "loc_001D24E8:\n"
                  "        ctx->gpr[28] = vm_read32(ctx->gpr[28] + 0x0);\n"

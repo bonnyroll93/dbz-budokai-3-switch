@@ -326,7 +326,7 @@ add_executable(${PROJECT_NAME}
     ${SPU_SOURCES}
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
-    target_sources(${PROJECT_NAME} PRIVATE switch_app.c)
+    target_sources(${PROJECT_NAME} PRIVATE switch_app.c dbz3_capture.c)
     # T23: inline guest loads/stores in the lifted code (ppu_recomp.h).
     option(PORT_PPU_FAST_VM "Inline plain guest memory access in lifted PPU code" ON)
     if(PORT_PPU_FAST_VM)
@@ -480,6 +480,10 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 target_link_libraries(${PROJECT_NAME} PRIVATE
     ps3recomp_runtime
 )
+if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+    target_include_directories(${PROJECT_NAME} PRIVATE "$ENV{DEVKITPRO}/portlibs/switch/include")
+    target_link_libraries(${PROJECT_NAME} PRIVATE "$ENV{DEVKITPRO}/portlibs/switch/lib/libjpeg.a")
+endif()
 
 # The runtime is C++, and on Apple also Objective-C. Letting CMake infer the
 # link language from the generated C would leave the C++ standard library out.

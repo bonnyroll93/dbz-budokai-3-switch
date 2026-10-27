@@ -11,6 +11,7 @@ typedef struct SwitchDebugSettings {
     int menu_open;
     int selected;
     int reboot_error;
+    int recording;
 } SwitchDebugSettings;
 
 void switch_debug_init(void);
@@ -19,5 +20,8 @@ SwitchDebugSettings switch_debug_snapshot(void);
 int switch_debug_input(uint64_t buttons);
 int switch_debug_take_reboot(void);
 void switch_debug_reboot_failed(int result);
+int switch_debug_take_screenshot(void);
+int switch_debug_recording(void);
+void switch_debug_stop_recording(void);
 
 #endif

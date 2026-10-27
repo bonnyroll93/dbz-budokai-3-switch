@@ -49,6 +49,8 @@ static atomic_int debug_menu;
 static atomic_int debug_selected;
 static atomic_int debug_reboot;
 static atomic_int debug_reboot_error;
+static atomic_int debug_screenshot;
+static atomic_int debug_recording;
 static int debug_active_scale;
 static u64 debug_old_buttons;
 static int debug_suppress_until_release;
@@ -102,7 +104,7 @@ SwitchDebugSettings switch_debug_snapshot(void)
         atomic_load(&debug_scale), debug_active_scale,
         atomic_load(&debug_fps), atomic_load(&debug_frame_ms),
         atomic_load(&debug_menu), atomic_load(&debug_selected),
-        atomic_load(&debug_reboot_error)
+        atomic_load(&debug_reboot_error), atomic_load(&debug_recording)
     };
     return s;
 }
@@ -121,8 +123,8 @@ int switch_debug_input(uint64_t buttons)
     }
     if (atomic_load(&debug_menu)) {
         int row = atomic_load(&debug_selected);
-        if (pressed & HidNpadButton_Up) row = (row + 4) % 5;
-        if (pressed & HidNpadButton_Down) row = (row + 1) % 5;
+        if (pressed & HidNpadButton_Up) row = (row + 6) % 7;
+        if (pressed & HidNpadButton_Down) row = (row + 1) % 7;
         atomic_store(&debug_selected, row);
         if (pressed & HidNpadButton_B) {
             atomic_store(&debug_menu, 0);
@@ -140,8 +142,16 @@ int switch_debug_input(uint64_t buttons)
                 atomic_store(&debug_frame_ms, !atomic_load(&debug_frame_ms));
                 switch_debug_save();
             } else if (row == 3 && (pressed & HidNpadButton_A)) {
-                atomic_store(&debug_reboot, 1);
+                atomic_store(&debug_screenshot, 1);
+                atomic_store(&debug_menu, 0);
+                debug_suppress_until_release = 1;
             } else if (row == 4 && (pressed & HidNpadButton_A)) {
+                atomic_store(&debug_recording, !atomic_load(&debug_recording));
+                atomic_store(&debug_menu, 0);
+                debug_suppress_until_release = 1;
+            } else if (row == 5 && (pressed & HidNpadButton_A)) {
+                atomic_store(&debug_reboot, 1);
+            } else if (row == 6 && (pressed & HidNpadButton_A)) {
                 atomic_store(&debug_menu, 0);
                 debug_suppress_until_release = 1;
             }
@@ -157,6 +167,9 @@ int switch_debug_input(uint64_t buttons)
 
 int switch_debug_take_reboot(void) { return atomic_exchange(&debug_reboot, 0); }
 void switch_debug_reboot_failed(int result) { atomic_store(&debug_reboot_error, result); }
+int switch_debug_take_screenshot(void) { return atomic_exchange(&debug_screenshot, 0); }
+int switch_debug_recording(void) { return atomic_load(&debug_recording); }
+void switch_debug_stop_recording(void) { atomic_store(&debug_recording, 0); }
 
 static void switch_input_read_native(Ps3PlatformPadState pads[PS3_PLATFORM_PAD_COUNT])
 {

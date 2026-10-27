@@ -4,7 +4,7 @@
 #   .\scripts\pull-switch-logs.ps1 -Game dbz3                                -> build\logs\dbz3\dev\runNN
 #   .\scripts\pull-switch-logs.ps1 -Game dbz3 -Version 0.15.0 -Feature alphafix  -> that release's folder
 #
-# Copies *.log, t23-shaders\ and t28-tex\ from SD:/switch/dbz-budokai-3-switch, plus the
+# Copies *.log, t23-shaders\, t28-tex\ and captures\ from SD:/switch/dbz-budokai-3-switch, plus the
 # Atmosphere crash reports of the game's title. Never the game\ or hdd0\ data.
 [CmdletBinding()]
 param(
@@ -42,7 +42,8 @@ $target = $shell.NameSpace($dst)
 $wanted = @()
 foreach ($item in $app.GetFolder.Items()) {
     if ($item.Name -eq 't23-shaders' -or
-        (-not $ShadersOnly -and ($item.Name -like '*.log' -or $item.Name -eq 't28-tex'))) {
+        (-not $ShadersOnly -and ($item.Name -like '*.log' -or $item.Name -eq 't28-tex' -or
+                                $item.Name -eq 'captures'))) {
         $wanted += $item
     }
 }
