@@ -1825,6 +1825,26 @@ static u32 be_pipeline_create(void* user, const char* vs_hlsl, const char* ps_hl
     P->used = 1;
     s_dk.st.pipelines_made++;
     s_spk.pipes++;
+    /* Pair pass-dump pipeline IDs with the precompiled shader sources. */
+    {
+        static FILE* map;
+        static int opened;
+        if (!opened) {
+            opened = 1;
+            const char* dir = getenv("RSX_ENGINE_PASS_DUMP");
+            if (dir && *dir) {
+                char path[512];
+                snprintf(path, sizeof path, "%s/pipelines-deko.txt", dir);
+                map = fopen(path, "w");
+            }
+        }
+        if (map) {
+            fprintf(map, "%u vs=%016llx ps=%016llx stride=%u rt=%d x%u\n",
+                    slot + 1u, (unsigned long long)hv, (unsigned long long)hp,
+                    vertex_stride, (int)rt_fmt, rt_count);
+            fflush(map);
+        }
+    }
     if (s_dk.st.pipelines_made <= 32)
         dk_log("pipeline %u: vs %016llx ps %016llx stride %u attrs %u rt %d x%u "
                "blend %u depth %u/%u cull %u\n", slot + 1u,
