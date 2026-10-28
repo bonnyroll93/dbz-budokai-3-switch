@@ -61,14 +61,72 @@ def _vmul_be(match: "re.Match[str]") -> str:
             f"memcpy(&ctx->vr[{vd}], r, 16); }}")
 
 
+# The same host-endian defect in three more value-sensitive ops: vsubsws
+# (int32 saturating subtract), vaddshs (int16 saturating add) and vmsumshm
+# (int16 pair products summed into an int32 accumulator). Pure lane moves
+# (vsplth, vmrg*) are unaffected and left alone.
+_VSUBSWS_RE = re.compile(
+    r"\{ int32_t\* d=\(int32_t\*\)&ctx->vr\[(\d+)\]; int32_t\* a=\(int32_t\*\)&ctx->vr\[(\d+)\]; "
+    r"int32_t\* b=\(int32_t\*\)&ctx->vr\[(\d+)\]; "
+    r"for\(int i=0;i<4;i\+\+\)\{int64_t r=\(int64_t\)a\[i\]-\(int64_t\)b\[i\]; "
+    r"d\[i\]=\(int32_t\)\(r>0x7FFFFFFFLL\?0x7FFFFFFFLL:r<-0x80000000LL\?-0x80000000LL:r\);\} \}")
+_VADDSHS_RE = re.compile(
+    r"\{ int16_t\* d=\(int16_t\*\)&ctx->vr\[(\d+)\]; int16_t\* a=\(int16_t\*\)&ctx->vr\[(\d+)\]; "
+    r"int16_t\* b=\(int16_t\*\)&ctx->vr\[(\d+)\]; "
+    r"for\(int i=0;i<8;i\+\+\)\{int32_t r=\(int32_t\)a\[i\]\+\(int32_t\)b\[i\]; "
+    r"d\[i\]=\(int16_t\)\(r>32767\?32767:r<-32768\?-32768:r\);\} \}")
+_VMSUMSHM_RE = re.compile(
+    r"\{ int16_t\* a=\(int16_t\*\)&ctx->vr\[(\d+)\]; int16_t\* b=\(int16_t\*\)&ctx->vr\[(\d+)\]; "
+    r"int32_t\* c=\(int32_t\*\)&ctx->vr\[(\d+)\]; int32_t\* d=\(int32_t\*\)&ctx->vr\[(\d+)\]; "
+    r"for\(int i=0;i<4;i\+\+\) d\[i\]=c\[i\]\+\(int32_t\)a\[i\*2\]\*\(int32_t\)b\[i\*2\]"
+    r"\+\(int32_t\)a\[i\*2\+1\]\*\(int32_t\)b\[i\*2\+1\]; \}")
+
+
+def _vsubsws_be(m: "re.Match[str]") -> str:
+    vd, va, vb = m.group(1), m.group(2), m.group(3)
+    return (f"{{ uint32_t a[4],b[4],d[4]; ppu_vldu4(&ctx->vr[{va}],a); ppu_vldu4(&ctx->vr[{vb}],b); "
+            f"for(int i=0;i<4;i++){{int64_t r=(int64_t)(int32_t)a[i]-(int64_t)(int32_t)b[i]; "
+            f"d[i]=(uint32_t)(int32_t)(r>0x7FFFFFFFLL?0x7FFFFFFFLL:r<-0x80000000LL?-0x80000000LL:r);}} "
+            f"ppu_vstu4(&ctx->vr[{vd}],d); }}")
+
+
+def _vaddshs_be(m: "re.Match[str]") -> str:
+    vd, va, vb = m.group(1), m.group(2), m.group(3)
+    return (f"{{ const uint8_t* a=(const uint8_t*)&ctx->vr[{va}]; const uint8_t* b=(const uint8_t*)&ctx->vr[{vb}]; "
+            f"uint8_t r[16]; for(int i=0;i<8;i++){{ "
+            f"int32_t x=(int16_t)(uint16_t)((a[2*i]<<8)|a[2*i+1]); int32_t y=(int16_t)(uint16_t)((b[2*i]<<8)|b[2*i+1]); "
+            f"int32_t s=x+y; s=s>32767?32767:s<-32768?-32768:s; "
+            f"r[2*i]=(uint8_t)((uint32_t)s>>8); r[2*i+1]=(uint8_t)s; }} memcpy(&ctx->vr[{vd}], r, 16); }}")
+
+
+def _vmsumshm_be(m: "re.Match[str]") -> str:
+    va, vb, vc, vd = m.group(1), m.group(2), m.group(3), m.group(4)
+    return (f"{{ const uint8_t* a=(const uint8_t*)&ctx->vr[{va}]; const uint8_t* b=(const uint8_t*)&ctx->vr[{vb}]; "
+            f"uint32_t c[4],d[4]; ppu_vldu4(&ctx->vr[{vc}],c); for(int i=0;i<4;i++){{ "
+            f"int32_t a0=(int16_t)(uint16_t)((a[4*i]<<8)|a[4*i+1]), a1=(int16_t)(uint16_t)((a[4*i+2]<<8)|a[4*i+3]); "
+            f"int32_t b0=(int16_t)(uint16_t)((b[4*i]<<8)|b[4*i+1]), b1=(int16_t)(uint16_t)((b[4*i+2]<<8)|b[4*i+3]); "
+            f"d[i]=c[i]+(uint32_t)(a0*b0)+(uint32_t)(a1*b1); }} ppu_vstu4(&ctx->vr[{vd}],d); }}")
+
+
+_BE_FIXES = (
+    (_VMUL_RE, _vmul_be),
+    (_VSUBSWS_RE, _vsubsws_be),
+    (_VADDSHS_RE, _vaddshs_be),
+    (_VMSUMSHM_RE, _vmsumshm_be),
+)
+
+
 def fix_vmul_halfwords(directory: pathlib.Path) -> int:
     total = 0
     for path in sorted(directory.glob("*.cpp")) + sorted(directory.glob("*.inc")):
         data = path.read_text(encoding="latin-1")
-        fixed, n = _VMUL_RE.subn(_vmul_be, data)
-        if n:
-            path.write_text(fixed, encoding="latin-1", newline="\n")
-            total += n
+        changed = 0
+        for regex, repl in _BE_FIXES:
+            data, n = regex.subn(repl, data)
+            changed += n
+        if changed:
+            path.write_text(data, encoding="latin-1", newline="\n")
+            total += changed
     return total
 
 
