@@ -81,6 +81,7 @@ def main() -> None:
     # 0x41300000..0x4A800000, so rejecting 0x4... nodes hides its scene.
     replace_once(chunk3, "void func_001D1EC0(ppu_context* ctx) {",
                  "extern \"C\" uint32_t g_sys_mem_bump_ptr;\n"
+                 "extern \"C\" uint32_t g_dbz3_du_rejects[4];\n"
                  "static inline bool dbz3_du_effect_node_valid(uint32_t p) {\n"
                  "    return !(p & 3u) && ((p >= 0x10000u && p <= 0x1FFFFFCCu) ||\n"
                  "           (p >= 0x30000000u && p <= 0x301FFFCCu) ||\n"
@@ -94,7 +95,7 @@ def main() -> None:
                  "        ctx->lr = 0x001D23E0; func_0001D954(ctx);",
                  "        ctx->gpr[28] = vm_read32(ctx->gpr[4] + 0x20);\n"
                  "        if (ctx->gpr[28] && !dbz3_du_effect_node_valid((uint32_t)ctx->gpr[28])) {\n"
-                 "            static unsigned bad_nodes = 0;\n"
+                 "            static unsigned bad_nodes = 0; g_dbz3_du_rejects[0]++;\n"
                  "            if (bad_nodes++ < 8u) fprintf(stderr, \"[du-effect] invalid first node=0x%08X owner=0x%08X\\n\",\n"
                  "                                         (uint32_t)ctx->gpr[28], (uint32_t)ctx->gpr[4]);\n"
                  "            goto loc_001D24F4;\n"
@@ -106,7 +107,7 @@ def main() -> None:
                  "        ctx->gpr[3] = vm_read32(ctx->gpr[5] + 0x0);\n"
                  "        ctx->lr = 0x001D242C;",
                  "        if (!dbz3_du_effect_node_valid((uint32_t)ctx->gpr[5])) {\n"
-                 "            static unsigned bad_derived = 0;\n"
+                 "            static unsigned bad_derived = 0; g_dbz3_du_rejects[1]++;\n"
                  "            if (bad_derived++ < 8u) fprintf(stderr, \"[du-effect] invalid derived=0x%08X node=0x%08X index=0x%08X\\n\",\n"
                  "                                              (uint32_t)ctx->gpr[5], (uint32_t)ctx->gpr[28], (uint32_t)ctx->gpr[6]);\n"
                  "            goto loc_001D24E8;\n"
@@ -120,7 +121,7 @@ def main() -> None:
                  "loc_001D24E8:\n"
                  "        ctx->gpr[28] = vm_read32(ctx->gpr[28] + 0x0);\n"
                  "        if (ctx->gpr[28] && !dbz3_du_effect_node_valid((uint32_t)ctx->gpr[28])) {\n"
-                 "            static unsigned bad_links = 0;\n"
+                 "            static unsigned bad_links = 0; g_dbz3_du_rejects[2]++;\n"
                  "            if (bad_links++ < 8u) fprintf(stderr, \"[du-effect] invalid next node=0x%08X\\n\",\n"
                  "                                         (uint32_t)ctx->gpr[28]);\n"
                  "            goto loc_001D24F4;\n"
@@ -134,6 +135,7 @@ def main() -> None:
     # the current iterator, preserving the rest of the DU effect list.
     replace_once(chunk0, "void func_00021C6C(ppu_context* ctx) {",
                  "extern \"C\" uint32_t g_sys_mem_bump_ptr;\n"
+                 "extern \"C\" uint32_t g_dbz3_du_rejects[4];\n"
                  "static inline bool dbz3_du_effect_lookup_valid(uint32_t p) {\n"
                  "    return !(p & 3u) && ((p >= 0x10000u && p <= 0x1FFFFFCCu) ||\n"
                  "           (p >= 0x30000000u && p <= 0x301FFFCCu) ||\n"
@@ -147,7 +149,7 @@ def main() -> None:
                  "        ctx->gpr[25] = vm_read32(ctx->gpr[3] + 0x0);",
                  "        ctx->gpr[3] = ppc_rldicl(ctx->gpr[3], 0, 32);\n"
                  "        if (!dbz3_du_effect_lookup_valid((uint32_t)ctx->gpr[3])) {\n"
-                 "            static unsigned bad_lookup = 0;\n"
+                 "            static unsigned bad_lookup = 0; g_dbz3_du_rejects[3]++;\n"
                  "            if (bad_lookup++ < 8u) fprintf(stderr, \"[du-effect] invalid lookup=0x%08X container=0x%08X index=%u\\n\",\n"
                  "                                              (uint32_t)ctx->gpr[3], (uint32_t)ctx->gpr[27], (uint32_t)ctx->gpr[24]);\n"
                  "            goto loc_00021F4C;\n"
