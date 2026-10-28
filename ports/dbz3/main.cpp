@@ -266,7 +266,7 @@ static void present_guest_frame(void)
 
 static DWORD WINAPI frame_clock(LPVOID)
 {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(PORT_DBZ3_FRAME_CLOCK_METRICS)
     ps3_thread_stats_register("frame", "frame-clock+fifo");
 #endif
     const char* title = getenv("PS3_TITLE");
@@ -275,14 +275,14 @@ static DWORD WINAPI frame_clock(LPVOID)
     int rsx_ok = (rsx_backend_init(WINDOW_WIDTH, WINDOW_HEIGHT, title) == 0);
     fprintf(stderr, "[rsx] %s backend init %s\n", RSX_BACKEND_NAME,
             rsx_ok ? "OK" : "FAILED");
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(PORT_DBZ3_FRAME_CLOCK_METRICS)
     ps3_switch_app_stage(rsx_ok ? "Game display ready" : "Game display init failed");
 #endif
 
     unsigned  last_flip = 0;
     uint64_t next_tick_us = frame_now_us();
     unsigned tick_remainder = 0;
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(PORT_DBZ3_FRAME_CLOCK_METRICS)
     const uint64_t frame_start_ms = next_tick_us / 1000ull;
     FILE* clock_diag = fopen("sdmc:/switch/dbz-budokai-3-switch/t21-clock.log", "w");
     FILE* heartbeat_diag = fopen("sdmc:/switch/dbz-budokai-3-switch/t21-heartbeat.log", "w");
@@ -328,13 +328,13 @@ static DWORD WINAPI frame_clock(LPVOID)
      * fixed 4 ms left the PPU waiting on frames the drain had not reached. */
     uint32_t idle_get = 0xFFFFFFFFu;
     for (;;) {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(PORT_DBZ3_FRAME_CLOCK_METRICS)
         uint64_t section_start = frame_now_ms();
 #endif
         { const uint32_t g = cellGcm_fifo_get_offset();
           frame_sleep_ms(g != idle_get ? 1 : 4);
           idle_get = g; }
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(PORT_DBZ3_FRAME_CLOCK_METRICS)
         const uint64_t sleep_elapsed = frame_now_ms() - section_start;
         sleep_ms += sleep_elapsed;
         if (sleep_elapsed > sleep_max_ms) sleep_max_ms = sleep_elapsed;
@@ -345,12 +345,12 @@ static DWORD WINAPI frame_clock(LPVOID)
 
         int fired = 0;
         while ((int64_t)(now_us - next_tick_us) >= 0 && fired < 240) {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(PORT_DBZ3_FRAME_CLOCK_METRICS)
             section_start = frame_now_ms();
 #endif
             cellGcmTickVBlank();
             cellGcmTickFlip();
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(PORT_DBZ3_FRAME_CLOCK_METRICS)
             tick_ms += frame_now_ms() - section_start;
 #endif
             /* Present a pending flip BEFORE draining any further. The flip
@@ -359,7 +359,7 @@ static DWORD WINAPI frame_clock(LPVOID)
              * after the drain races the guest's next-frame writes and shows a
              * mixed one. */
             if (rsx_ok && cellGcm_take_flip_pending()) {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(PORT_DBZ3_FRAME_CLOCK_METRICS)
                 timed_present();
 #else
                 present_guest_frame();
@@ -370,7 +370,7 @@ static DWORD WINAPI frame_clock(LPVOID)
              * labels the game's per-frame logic blocks on, so it has to keep
              * advancing at 60 Hz even while present() throttles. */
             if (rsx_ok) {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(PORT_DBZ3_FRAME_CLOCK_METRICS)
                 timed_fifo_drain();
 #else
                 cellGcm_rsx_process_fifo();
@@ -389,14 +389,14 @@ static DWORD WINAPI frame_clock(LPVOID)
          * The real RSX writes them in microseconds. */
         if (rsx_ok) {
             if (cellGcm_take_flip_pending()) {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(PORT_DBZ3_FRAME_CLOCK_METRICS)
                 timed_present();
 #else
                 present_guest_frame();
 #endif
                 last_flip = cellGcm_flip_request_count();
             }
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(PORT_DBZ3_FRAME_CLOCK_METRICS)
             timed_fifo_drain();
 #else
             cellGcm_rsx_process_fifo();
@@ -411,7 +411,7 @@ static DWORD WINAPI frame_clock(LPVOID)
              * present freely, so the window is not blank during boot. */
             unsigned fc = cellGcm_flip_request_count();
             if (fc != last_flip) {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(PORT_DBZ3_FRAME_CLOCK_METRICS)
                 timed_present();
 #else
                 present_guest_frame();
@@ -423,7 +423,7 @@ static DWORD WINAPI frame_clock(LPVOID)
 #endif
             }
         }
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(PORT_DBZ3_FRAME_CLOCK_METRICS)
         unsigned frames_now = (unsigned)g_frames_presented;
         if (frames_now != last_progress_frames) {
             last_progress_frames = frames_now;
@@ -710,6 +710,7 @@ int main(int argc, char** argv)
      * the time of the build that is running. */
     fprintf(stderr, "[build] compiled %s %s\n", __DATE__, __TIME__);
     /* A run stopping before a subsystem starts must not inherit its old log. */
+    #ifndef PORT_DBZ3_LIGHT_BUILD
     const char* boot_logs[] = {"t21-frames.log", "t21-spu-hot.log", "t21-input.log",
         "t21-input-queue.log",
         "t21-clock.log", "t21-heartbeat.log", "t21-stall.log", "t21-spu-cpu.log", "t21-spu-schedule.log",
@@ -724,11 +725,17 @@ int main(int argc, char** argv)
             fclose(log);
         }
     }
+    #endif
     /* Diagnostics only on request: GPU log, shader dumps, PPU and thread
      * samplers, heap checks cost the game frame time (SD writes, sampler
      * threads). Create sdmc:/switch/dbz-budokai-3-switch/diag.on to turn them on. */
     {
-        FILE* marker = fopen("sdmc:/switch/dbz-budokai-3-switch/diag.on", "r");
+        FILE* marker =
+#ifdef PORT_DBZ3_LIGHT_BUILD
+            nullptr;
+#else
+            fopen("sdmc:/switch/dbz-budokai-3-switch/diag.on", "r");
+#endif
         ps3_diag_enabled = marker ? 1 : 0;
         if (marker) fclose(marker);
         fprintf(stderr, "[diag] verbose diagnostics %s (diag.on %s)\n",

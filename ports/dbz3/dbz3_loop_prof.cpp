@@ -41,6 +41,16 @@ static inline uint64_t lp_ticks(void)
 static inline uint64_t lp_us(uint64_t t) { return t; }
 #endif
 
+/* Gameplay pacing uses lp_ticks(); diagnostic timing uses metric_ticks(). */
+static inline uint64_t metric_ticks(void)
+{
+#ifdef PORT_DBZ3_LOOP_METRICS
+    return lp_ticks();
+#else
+    return 0;
+#endif
+}
+
 extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
 
 extern "C" int ps3_diag_enabled;   /* cellGcmSys.c, from diag.on at boot */
@@ -135,14 +145,22 @@ uint32_t scene_target(void)
 
 void add(int slot, uint64_t us)
 {
+#ifdef PORT_DBZ3_LOOP_METRICS
     g_w.sum[slot] += us;
     if (us > g_w.max[slot]) g_w.max[slot] = us;
+#else
+    (void)slot; (void)us;
+#endif
 }
 
 int task_class(uint32_t fn);
 
 void flush(uint64_t now)
 {
+#ifndef PORT_DBZ3_LOOP_METRICS
+    (void)now;
+    return;
+#else
     if (!g_log) g_log = fopen("sdmc:/switch/dbz-budokai-3-switch/t26-loop-prof.log", "w");
     if (!g_log || g_w.frames == 0) return;
     const double n = (double)g_w.frames;
@@ -218,11 +236,13 @@ void flush(uint64_t now)
     fflush(g_log);
     g_w = Window{};
     g_window_start = now;
+#endif
 }
 
 /* Start of the exit check: the scene call has just returned. */
 void on_pass_start(void)
 {
+#ifdef PORT_DBZ3_LOOP_METRICS
     const uint64_t now = lp_ticks();
     if (!g_window_start) g_window_start = now;
     const uint32_t target = scene_target();
@@ -252,6 +272,7 @@ void on_pass_start(void)
     }
     g_pass_start = now;
     if (lp_us(now - g_window_start) >= 5000000u) flush(now);
+#endif
 }
 
 uint32_t gcm_current(void) { return vm_read32(kTitleGcmCtx + 8u); }
@@ -276,6 +297,10 @@ int g_du_phase_expected = 0;
 
 extern "C" void dbz3_du_phase_probe(uint32_t phase)
 {
+#ifndef PORT_DBZ3_LOOP_METRICS
+    (void)phase;
+    return;
+#else
     if (g_dbz3_cur_task_fn != 0x001DBC58u ||
         (g_dbz3_cur_pass != 1 && g_dbz3_cur_pass != 2)) return;
     const uint64_t tick = lp_ticks();
@@ -298,6 +323,7 @@ extern "C" void dbz3_du_phase_probe(uint32_t phase)
     g_du_phase_tick = tick;
     g_du_phase_gcm = gcm;
     g_du_phase_expected++;
+#endif
 }
 
 /* Task classes for the 60 Hz logic step: a task function that has ever moved
@@ -480,6 +506,10 @@ int heap_walk(uint32_t* bad_node, uint32_t* bad_val, int* which)
 
 void heap_check(const char* where, uint32_t fn, uint32_t task, int step)
 {
+#ifndef PORT_DBZ3_LOOP_METRICS
+    (void)where; (void)fn; (void)task; (void)step;
+    return;
+#else
     if (!ps3_diag_enabled) return;     /* full heap walk: diagnostics only */
     g_heap_checks++;
     if (g_heap_bad_logged >= 3) return;
@@ -506,6 +536,7 @@ void heap_check(const char* where, uint32_t fn, uint32_t task, int step)
     if (val >= 0x00010000u) dbz3_heap_trace_dump(g_log, node ? node : val);
     fflush(g_log);
     g_heap_bad_logged++;
+#endif
 }
 
 uint64_t task_list_sig(void)
@@ -524,6 +555,10 @@ void record_task(uint32_t fn, uint32_t task, uint32_t order, uint64_t us,
                  uint32_t gcm_bytes)
 {
     classify(fn, gcm_bytes != 0);
+#ifndef PORT_DBZ3_LOOP_METRICS
+    (void)task; (void)order; (void)us;
+    return;
+#else
     for (int i = 0; i < kMaxTasks; ++i) {
         TaskStat& t = g_w.tasks[i];
         if (t.fn != fn && t.fn != 0) continue;
@@ -536,10 +571,15 @@ void record_task(uint32_t fn, uint32_t task, uint32_t order, uint64_t us,
         if (gcm_bytes) { t.gcm_runs++; t.gcm_bytes += gcm_bytes; }
         return;
     }
+#endif
 }
 
 void record_extra_task(uint32_t fn, uint64_t us)
 {
+#ifndef PORT_DBZ3_LOOP_METRICS
+    (void)fn; (void)us;
+    return;
+#else
     for (int i = 0; i < kMaxTasks; ++i) {
         TaskStat& t = g_w.tasks[i];
         if (t.fn != fn && t.fn != 0) continue;
@@ -548,6 +588,7 @@ void record_extra_task(uint32_t fn, uint64_t us)
         t.extra_us += us;
         return;
     }
+#endif
 }
 
 } // namespace
@@ -581,6 +622,10 @@ uint32_t g_padrec_lines = 0;
 
 void pad_rec_trace(int pass)
 {
+#ifndef PORT_DBZ3_LOOP_METRICS
+    (void)pass;
+    return;
+#else
     if (g_padrec_lines >= 6000u) return;
     uint32_t cur[kPadRecWords];
     for (uint32_t i = 0; i < kPadRecWords; ++i) cur[i] = vm_read32(kPadRecBase + i * 4u);
@@ -604,6 +649,7 @@ void pad_rec_trace(int pass)
     fprintf(g_padrec_log, "ms=%llu pass=%d frame=%llu n=%d%s\n", (unsigned long long)ms, pass,
             (unsigned long long)g_w.task_passes, changed, buf);
     if (++g_padrec_lines % 16u == 0) fflush(g_padrec_log);
+#endif
 }
 
 #define LOOP_WRAP(ADDR, SLOT, LR, PRE, POST)                                    \
@@ -615,10 +661,10 @@ void pad_rec_trace(int pass)
     {                                                                           \
         if ((uint32_t)ctx->lr != (LR)) { real_func_##ADDR(ctx); return; }       \
         PRE;                                                                    \
-        const uint64_t t0 = lp_ticks();                                         \
+        const uint64_t t0 = metric_ticks();                                     \
         real_func_##ADDR(ctx);                                                  \
         DRAIN_TRAMPOLINE(ctx);                                                  \
-        const uint64_t t1 = lp_ticks();                                         \
+        const uint64_t t1 = metric_ticks();                                     \
         add(SLOT, lp_us(t1 - t0));                                              \
         POST;                                                                   \
     }
@@ -750,8 +796,13 @@ uint32_t gcm_put(void) { return vm_read32(ppu_hle_inject_base + 0x2000u); }
 
 int extra_logic_step(ppu_context* ctx)
 {
-    const uint64_t t0 = lp_ticks();
-    const uint64_t sig0 = task_list_sig();
+    const uint64_t t0 = metric_ticks();
+    const uint64_t sig0 =
+#ifdef PORT_DBZ3_LOOP_METRICS
+        task_list_sig();
+#else
+        0;
+#endif
     int ok = 1;
     const uint64_t save_r1 = ctx->gpr[1], save_r2 = ctx->gpr[2];
     const uint64_t save_r28 = ctx->gpr[28], save_r29 = ctx->gpr[29];
@@ -805,9 +856,9 @@ int extra_logic_step(ppu_context* ctx)
                 ctx->gpr[2] = vm_read32(opd + 4u);
                 ctx->lr = 0x00029050u;
                 g_dbz3_cur_task_fn = fn; g_dbz3_cur_pass = 2;
-                const uint64_t extra_task_t0 = lp_ticks();
+                const uint64_t extra_task_t0 = metric_ticks();
                 ps3_indirect_call(ctx); DRAIN_TRAMPOLINE(ctx);
-                record_extra_task(fn, lp_us(lp_ticks() - extra_task_t0));
+                record_extra_task(fn, lp_us(metric_ticks() - extra_task_t0));
                 g_dbz3_cur_task_fn = 0; g_dbz3_cur_pass = 0;
                 ctx->gpr[2] = vm_read64(ctx->gpr[1] + 0x28);
                 ++ran;
@@ -845,7 +896,7 @@ int extra_logic_step(ppu_context* ctx)
     ctx->gpr[30] = save_r30; ctx->gpr[31] = save_r31;
     ctx->lr = save_lr;
 
-    const uint64_t us = lp_us(lp_ticks() - t0);
+    const uint64_t us = lp_us(metric_ticks() - t0);
     g_w.extra_us += us;
     if (us > g_w.extra_max_us) g_w.extra_max_us = us;
     g_w.extra_tasks += ran;
@@ -859,7 +910,7 @@ extern "C" void wrap_func_00028FD8(ppu_context* ctx)
 extern "C" void wrap_func_00028FD8(ppu_context* ctx)
 {
     if ((uint32_t)ctx->lr != 0x0015A274u) { real_func_00028FD8(ctx); return; }
-    const uint64_t sched_t0 = lp_ticks();
+    const uint64_t sched_t0 = metric_ticks();
     uint32_t order = 0;
     g_w.task_passes++;
 #ifdef PORT_DBZ3_LOGIC60
@@ -898,7 +949,7 @@ loc_00029014:
             const uint32_t task = (uint32_t)ctx->gpr[30];
             const uint32_t fn = vm_read32((uint32_t)ctx->gpr[3]);
             const uint32_t g0 = gcm_current();
-            const uint64_t t0 = lp_ticks();
+            const uint64_t t0 = metric_ticks();
         ctx->gpr[4] = ctx->gpr[3] | 0x0;
         ctx->gpr[3] = ctx->gpr[30] | 0x0;
         ctx->gpr[5] = vm_read32(ctx->gpr[4] + 0x0);
@@ -909,7 +960,7 @@ loc_00029014:
         { ps3_indirect_call(ctx); DRAIN_TRAMPOLINE(ctx); }
         g_dbz3_cur_task_fn = 0; g_dbz3_cur_pass = 0;
         ctx->gpr[2] = vm_read64(ctx->gpr[1] + 0x28);
-            const uint64_t t1 = lp_ticks();
+            const uint64_t t1 = metric_ticks();
             record_task(fn, task, order, lp_us(t1 - t0), gcm_written(g0, gcm_current()));
         }
 loc_00029054:
@@ -1004,5 +1055,5 @@ loc_0002911C:
 #else
     g_w.steps_hist[1]++;
 #endif
-    add(S_28FD8, lp_us(lp_ticks() - sched_t0));
+    add(S_28FD8, lp_us(metric_ticks() - sched_t0));
 }

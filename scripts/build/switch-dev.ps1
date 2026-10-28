@@ -25,6 +25,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\switch-games.ps1')
+. (Join-Path $PSScriptRoot 'switch-build-config.ps1')
 $g = Get-SwitchGame $Game
 $nsp = Get-SwitchDevNsp $Game
 
@@ -35,8 +36,9 @@ if (-not $NoBuild) {
     & (Join-Path $PSScriptRoot 'prebuild-shaders.ps1') -DevkitPro $DevkitPro
     # Reconfigure on every run so changed CMake options and SDK paths are used.
     & (Join-Path $PSScriptRoot 'configure-switch.ps1') -DevkitPro $DevkitPro `
-        -ProfilePpuFunctions:$ProfilePpuFunctions -LevelFunctionProfile:$LevelFunctionProfile `
-        -InputQueueProfile:$InputQueueProfile
+        -ProfilePpuFunctions:($ProfilePpuFunctions -or $SwitchBuild.ProfilePpuFunctions) `
+        -LevelFunctionProfile:($LevelFunctionProfile -or $SwitchBuild.LevelFunctionProfile) `
+        -InputQueueProfile:($InputQueueProfile -or $SwitchBuild.InputQueueProfile)
     $bash = Join-Path $DevkitPro 'msys2\usr\bin\bash.exe'
     if (-not (Test-Path -LiteralPath $bash -PathType Leaf)) { throw "MSYS2 not found: $bash" }
     $tree = "build/cmake/$($g.Tree)"

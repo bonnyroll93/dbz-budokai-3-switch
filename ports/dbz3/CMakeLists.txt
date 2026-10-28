@@ -153,6 +153,14 @@ message(STATUS "Lifted sources:  ${RECOMP_SOURCE_COUNT} file(s)")
 # different reason. add_subdirectory hands all of that over with the target.
 add_subdirectory("${PS3RECOMP_DIR}" "${CMAKE_BINARY_DIR}/ps3recomp_sdk"
                  EXCLUDE_FROM_ALL)
+option(PORT_DBZ3_LIGHT_BUILD "Compile Switch without profiling and capture tools" OFF)
+option(PORT_DBZ3_LOOP_METRICS "Record DBZ3 loop and task timing" ON)
+option(PORT_DBZ3_FRAME_CLOCK_METRICS "Record Switch frame-clock timing" ON)
+option(PORT_DBZ3_SHADER_CAPTURE "Dump missing deko3d shaders to SD" ON)
+option(PORT_DBZ3_SCREENSHOT_CAPTURE "Include debug screenshot and MJPEG capture" ON)
+if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" AND PORT_DBZ3_LIGHT_BUILD)
+    target_compile_definitions(ps3recomp_runtime PRIVATE PORT_DBZ3_LIGHT_BUILD=1)
+endif()
 option(PORT_DBZ3_DEKO_DIAG "Enable detailed deko3d texture and draw diagnostics" OFF)
 if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" AND PORT_DBZ3_DEKO_DIAG)
     set_property(SOURCE "${PS3RECOMP_DIR}/libs/video/rsx_deko3d_backend.c"
@@ -326,7 +334,24 @@ add_executable(${PROJECT_NAME}
     ${SPU_SOURCES}
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
-    target_sources(${PROJECT_NAME} PRIVATE switch_app.c dbz3_capture.c)
+    target_sources(${PROJECT_NAME} PRIVATE switch_app.c)
+    if(PORT_DBZ3_SCREENSHOT_CAPTURE)
+        target_sources(${PROJECT_NAME} PRIVATE dbz3_capture.c)
+    endif()
+    if(PORT_DBZ3_LIGHT_BUILD)
+        target_compile_definitions(${PROJECT_NAME} PRIVATE PORT_DBZ3_LIGHT_BUILD=1)
+    endif()
+    if(PORT_DBZ3_LOOP_METRICS)
+        set_property(SOURCE dbz3_loop_prof.cpp APPEND PROPERTY COMPILE_DEFINITIONS PORT_DBZ3_LOOP_METRICS=1)
+    endif()
+    if(PORT_DBZ3_FRAME_CLOCK_METRICS)
+        set_property(SOURCE main.cpp APPEND PROPERTY COMPILE_DEFINITIONS PORT_DBZ3_FRAME_CLOCK_METRICS=1)
+    endif()
+    if(PORT_DBZ3_SHADER_CAPTURE)
+        set_property(SOURCE "${PS3RECOMP_DIR}/libs/video/rsx_deko3d_backend.c"
+            TARGET_DIRECTORY ps3recomp_runtime APPEND PROPERTY
+            COMPILE_DEFINITIONS PORT_DBZ3_SHADER_CAPTURE=1)
+    endif()
     # T23: inline guest loads/stores in the lifted code (ppu_recomp.h).
     option(PORT_PPU_FAST_VM "Inline plain guest memory access in lifted PPU code" ON)
     if(PORT_PPU_FAST_VM)
@@ -355,9 +380,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
         endif()
         target_link_options(${PROJECT_NAME} PRIVATE "LINKER:--wrap=_Z13func_001FCAC4P11ppu_context")
         message(STATUS "DBZ3 gcm-const fast path: ON")
-        # T6.1: time each step of main()'s frame loop (t26-loop-prof.log), to
-        # find the update/draw split for "2 logic steps per drawn frame".
-        option(PORT_DBZ3_LOOP_PROF "Profile DBZ3 main loop steps" ON)
+        # The loop wrappers also drive 60 Hz gameplay. Timing and log output are
+        # controlled separately by PORT_DBZ3_LOOP_METRICS.
+        option(PORT_DBZ3_LOOP_PROF "Enable DBZ3 loop wrappers for 60 Hz gameplay" ON)
         if(PORT_DBZ3_LOOP_PROF)
             option(PORT_DBZ3_LEVEL_FUNCTION_PROFILE "Time func_00030790 during the level task" OFF)
             if(PORT_DBZ3_LEVEL_FUNCTION_PROFILE)
@@ -365,14 +390,16 @@ if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
             endif()
             target_sources(${PROJECT_NAME} PRIVATE dbz3_loop_prof.cpp)
             # A4: CRI -> surround-mixer output trace (t27-adx.log).
-            target_sources(${PROJECT_NAME} PRIVATE dbz3_audio_trace.cpp)
+            if(NOT PORT_DBZ3_LIGHT_BUILD)
+                target_sources(${PROJECT_NAME} PRIVATE dbz3_audio_trace.cpp)
+                target_link_options(${PROJECT_NAME} PRIVATE
+                    "LINKER:--wrap=_Z13func_0021ED98P11ppu_context")
+            endif()
             if(PORT_DBZ3_PPU_NATIVE)
                 # A4: CRI error messages (weak override of func_00216DB4, TU 003).
                 target_sources(${PROJECT_NAME} PRIVATE dbz3_crierr.cpp)
                 set_property(SOURCE dbz3_crierr.cpp APPEND PROPERTY COMPILE_OPTIONS "-w;-ffp-contract=off")
             endif()
-            target_link_options(${PROJECT_NAME} PRIVATE
-                "LINKER:--wrap=_Z13func_0021ED98P11ppu_context")
             # T6.2b: allocator trace (alloc/free made weak in TU 000 by
             # dbz3_weak_overrides.h, so needs PORT_DBZ3_PPU_NATIVE).
             if(PORT_DBZ3_PPU_NATIVE)
@@ -482,7 +509,9 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
     target_include_directories(${PROJECT_NAME} PRIVATE "$ENV{DEVKITPRO}/portlibs/switch/include")
-    target_link_libraries(${PROJECT_NAME} PRIVATE "$ENV{DEVKITPRO}/portlibs/switch/lib/libjpeg.a")
+    if(PORT_DBZ3_SCREENSHOT_CAPTURE)
+        target_link_libraries(${PROJECT_NAME} PRIVATE "$ENV{DEVKITPRO}/portlibs/switch/lib/libjpeg.a")
+    endif()
 endif()
 
 # The runtime is C++, and on Apple also Objective-C. Letting CMake infer the

@@ -162,6 +162,10 @@ inline unsigned long long xn(std::atomic<uint64_t>& a)
 
 void report(uint64_t now)
 {
+#ifdef PORT_DBZ3_LIGHT_BUILD
+    (void)now;
+    return;
+#else
     Stats& s = g_stats;
     uint64_t start = s.window_start.load(std::memory_order_relaxed);
     if (start == 0) { s.window_start.store(now, std::memory_order_relaxed); return; }
@@ -185,22 +189,37 @@ void report(uint64_t now)
     }
     s.window_start.store(now, std::memory_order_relaxed);
     s.writing.store(0, std::memory_order_release);
+#endif
 }
+
+static inline uint64_t profile_ticks(void)
+{
+#ifdef PORT_DBZ3_LIGHT_BUILD
+    return 0;
+#else
+    return fp_ticks();
+#endif
+}
+#ifdef PORT_DBZ3_LIGHT_BUILD
+#define PROFILE_STAT(expr) do { } while (0)
+#else
+#define PROFILE_STAT(expr) do { expr; } while (0)
+#endif
 
 void call_original(ppu_context* ctx)
 {
-    const uint64_t t0 = fp_ticks();
+    const uint64_t t0 = profile_ticks();
     real_func_001FCAC4(ctx);
     /* The lifted body is split in two: the first half returns through the
      * trampoline into the second, which does the work (and any callback). Run
      * it here so the time below covers it; the caller's own drain then finds
      * nothing left to run. */
     DRAIN_TRAMPOLINE(ctx);
-    const uint64_t dt = fp_ticks() - t0;
+    const uint64_t dt = profile_ticks() - t0;
     Stats& s = g_stats;
-    s.slow_calls.fetch_add(1, std::memory_order_relaxed);
-    s.slow_ticks.fetch_add(dt, std::memory_order_relaxed);
-    track_max(s.slow_max_ticks, dt);
+    PROFILE_STAT(s.slow_calls.fetch_add(1, std::memory_order_relaxed));
+    PROFILE_STAT(s.slow_ticks.fetch_add(dt, std::memory_order_relaxed));
+    PROFILE_STAT(track_max(s.slow_max_ticks, dt));
     report(t0 + dt);
 }
 
@@ -263,7 +282,7 @@ bool ring_wrap(uint32_t c, uint32_t need)
             waited = fp_ticks() - t0;
             if (clear(cellGcm_fifo_get_offset())) break;
             if (fp_ticks_to_us(waited) >= kWrapTimeoutUs) {
-                s.wrap_timeouts.fetch_add(1, std::memory_order_relaxed);
+                PROFILE_STAT(s.wrap_timeouts.fetch_add(1, std::memory_order_relaxed));
                 fprintf(stderr, "[t24] ring wrap: walker did not clear the head in %u ms "
                         "(get=0x%08X ring=0x%08X-0x%08X cur=0x%08X) -- wrapping anyway\n",
                         kWrapTimeoutUs / 1000u, cellGcm_fifo_get_offset(),
@@ -275,9 +294,9 @@ bool ring_wrap(uint32_t c, uint32_t need)
 
     /* 3. Resume at the start of the ring. */
     store_be32(c + 8, r.begin);
-    s.wraps.fetch_add(1, std::memory_order_relaxed);
-    s.wrap_wait_ticks.fetch_add(waited, std::memory_order_relaxed);
-    track_max(s.wrap_max_ticks, waited);
+    PROFILE_STAT(s.wraps.fetch_add(1, std::memory_order_relaxed));
+    PROFILE_STAT(s.wrap_wait_ticks.fetch_add(waited, std::memory_order_relaxed));
+    PROFILE_STAT(track_max(s.wrap_max_ticks, waited));
     return true;
 }
 
@@ -288,9 +307,9 @@ void ring_full_callback(ppu_context* ctx)
     const uint32_t c = (uint32_t)ctx->gpr[3];
     const uint32_t words = (uint32_t)ctx->gpr[4];
     if (words < 0x10000000u && ring_wrap(c, words * 4u)) {
-        g_stats.cb_wraps.fetch_add(1, std::memory_order_relaxed);
+        PROFILE_STAT(g_stats.cb_wraps.fetch_add(1, std::memory_order_relaxed));
     } else {
-        g_stats.cb_fallbacks.fetch_add(1, std::memory_order_relaxed);
+        PROFILE_STAT(g_stats.cb_fallbacks.fetch_add(1, std::memory_order_relaxed));
         cellGcm_fifo_recycle(c);           /* the runtime's own behaviour */
     }
     ctx->gpr[3] = 0;                       /* CELL_OK: the caller re-reads current */
@@ -344,7 +363,7 @@ extern "C" void wrap_func_001FCAC4(ppu_context* ctx)
     }
     if (state < 0 || !g_ppu_fast_vm) { call_original(ctx); return; }
 
-    const uint64_t t0 = fp_ticks();
+    const uint64_t t0 = profile_ticks();
     Stats& s = g_stats;
     const uint32_t c      = (uint32_t)ctx->gpr[3];
     const uint32_t n      = (uint32_t)ctx->gpr[5];
@@ -398,10 +417,10 @@ extern "C" void wrap_func_001FCAC4(ppu_context* ctx)
                 waited = fp_ticks() - w0;
                 if (fp_ticks_to_us(waited) >= kLapTimeoutUs) { timed_out = true; break; }
             } while (blocked(cellGcm_fifo_get_offset()));
-            s.lap_waits.fetch_add(1, std::memory_order_relaxed);
-            s.lap_wait_ticks.fetch_add(waited, std::memory_order_relaxed);
+            PROFILE_STAT(s.lap_waits.fetch_add(1, std::memory_order_relaxed));
+            PROFILE_STAT(s.lap_wait_ticks.fetch_add(waited, std::memory_order_relaxed));
             if (timed_out) {
-                s.lap_timeouts.fetch_add(1, std::memory_order_relaxed);
+                PROFILE_STAT(s.lap_timeouts.fetch_add(1, std::memory_order_relaxed));
                 call_original(ctx);
                 return;
             }
@@ -429,9 +448,9 @@ extern "C" void wrap_func_001FCAC4(ppu_context* ctx)
      * context pointer untouched when there were no full blocks. */
     if (blocks) ctx->gpr[3] = index0 + 8ull * blocks;
 
-    const uint64_t t1 = fp_ticks();
-    s.fast_calls.fetch_add(1, std::memory_order_relaxed);
-    s.words.fetch_add(n, std::memory_order_relaxed);
-    s.fast_ticks.fetch_add(t1 - t0, std::memory_order_relaxed);
+    const uint64_t t1 = profile_ticks();
+    PROFILE_STAT(s.fast_calls.fetch_add(1, std::memory_order_relaxed));
+    PROFILE_STAT(s.words.fetch_add(n, std::memory_order_relaxed));
+    PROFILE_STAT(s.fast_ticks.fetch_add(t1 - t0, std::memory_order_relaxed));
     report(t1);
 }

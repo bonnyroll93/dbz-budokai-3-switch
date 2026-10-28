@@ -1829,7 +1829,7 @@ index f6e4e31..0144172 100644
      { static int dbg = -1;
        if (dbg < 0) dbg = getenv("SYS_HEAP_DBG") ? 1 : 0;
 diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
-index ac0a7a8..9ab380a 100644
+index ac0a7a8..a723317 100644
 --- a/libs/video/cellGcmSys.c
 +++ b/libs/video/cellGcmSys.c
 @@ -11,6 +11,11 @@
@@ -1848,7 +1848,7 @@ index ac0a7a8..9ab380a 100644
   * rsx_process_command_buffer so the game's clears/draws render. */
  /* Translate an RSX IO offset to a guest EA via the offset table (1MB pages,
   * populated by cellGcmInit / cellGcmMapMainMemory / MapEaIoAddress). */
-+#ifdef __SWITCH__
++#if defined(__SWITCH__) && !defined(PORT_DBZ3_LIGHT_BUILD)
 +/* T23: per-method FIFO cost on the Switch, from the generic timer (a register
 + * read, unlike the svc the older 1-in-64 sample uses). eng = draw engine,
 + * leg = legacy rsx_process_method. Top 24 methods every 5 s to
@@ -2126,7 +2126,7 @@ index ac0a7a8..9ab380a 100644
                  { static int eng = -1;
                    if (eng < 0) eng = rsx_draw_engine_enabled();
 -                  if (eng) rsx_draw_engine_method((subch << 13) | m, vm_read32(dea)); }
-+#ifdef __SWITCH__
++#if defined(__SWITCH__) && !defined(PORT_DBZ3_LIGHT_BUILD)
 +                  if (eng) { const u64 t0 = armGetSystemTick();
 +                             rsx_draw_engine_method((subch << 13) | m, vm_read32(dea));
 +                             s_fp_eng[(m >> 2) & 2047] += armGetSystemTick() - t0; }
@@ -2142,7 +2142,7 @@ index ac0a7a8..9ab380a 100644
                  } else if (mfull == 0xE920u || mfull == 0xE924u) {
                      cellGcmSetFlipCommand(vm_read32(dea) & 7u);
                  } else if (subch == 0 || (subch == 1 && !s1_2d)) {
-+#ifdef __SWITCH__
++#if defined(__SWITCH__) && !defined(PORT_DBZ3_LIGHT_BUILD)
 +                    /* Time draw commands exactly; sample one in 64 other 3D
 +                     * methods. Counts remain exact for both groups. */
 +                    int is_draw = (m == 0x1808u || m == 0x1814u || m == 0x1824u);
@@ -2441,7 +2441,7 @@ index dab4380..aafb346 100644
  /* ---- decoded state getters -------------------------------------------- */
  
 diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
-index b438d87..1793c21 100644
+index b438d87..bfcf532 100644
 --- a/libs/video/rsx_draw_engine.c
 +++ b/libs/video/rsx_draw_engine.c
 @@ -15,6 +15,7 @@
@@ -3525,7 +3525,7 @@ index b438d87..1793c21 100644
      }
  }
  
-+#ifdef __SWITCH__
++#if defined(__SWITCH__) && !defined(PORT_DBZ3_LIGHT_BUILD)
 +/* T23: where a draw's CPU time goes, per section, on the generic timer.
 + * sdmc:/switch/dbz-budokai-3-switch/t23-draw-prof.log every 5 s. */
 +static u64 s_dsec[8], s_dsec_draws, s_dsec_verts, s_dsec_refs, s_dsec_t0;
@@ -3583,7 +3583,7 @@ index b438d87..1793c21 100644
  {
      (void)user; (void)r;
      if (!g.ready || !dc.n_packets) return;
-+#ifdef __SWITCH__
++#if defined(__SWITCH__) && !defined(PORT_DBZ3_LIGHT_BUILD)
 +    eng_draw_prof_window();
 +    u64 _dt = eng_tick();
 +#endif
@@ -3622,7 +3622,7 @@ index b438d87..1793c21 100644
 +          }
 +      } }
 +    ENG_SEC(0);
-+#ifdef __SWITCH__
++#if defined(__SWITCH__) && !defined(PORT_DBZ3_LIGHT_BUILD)
 +    s_dsec_draws++; s_dsec_verts += dc.n_verts; s_dsec_refs += dc.n_source_refs;
 +#endif
      if (!dc.n_verts || !dc.fetch_ok) return;

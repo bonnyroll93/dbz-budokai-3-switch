@@ -142,6 +142,7 @@ static u64 dk_hash_str(const char* s)
     return h;
 }
 
+#ifdef PORT_DBZ3_SHADER_CAPTURE
 #define DK_SHADER_DUMP_DIR "sdmc:/switch/dbz-budokai-3-switch/t23-shaders"
 
 /* Stage 2 needs the decompilers' exact HLSL to write the GLSL that uam
@@ -200,6 +201,8 @@ static void dk_dump_pipeline(const char* vs_hlsl, const char* ps_hlsl,
            (unsigned long long)hv, (unsigned long long)hp, vertex_stride,
            layout ? layout->count : 0u);
 }
+
+#endif /* PORT_DBZ3_SHADER_CAPTURE */
 
 /* ---- state --------------------------------------------------------------- */
 
@@ -466,6 +469,10 @@ static struct {
 
 static void spk_wait_note(int line, u64 us)
 {
+#ifdef PORT_DBZ3_LIGHT_BUILD
+    (void)line; (void)us;
+    return;
+#else
     s_spk.wait_us += us;
     s_spk.waits++;
     int free_i = -1;
@@ -478,11 +485,16 @@ static void spk_wait_note(int line, u64 us)
     if (free_i >= 0) {
         s_spk.tag[free_i].line = (u32)line; s_spk.tag[free_i].n = 1; s_spk.tag[free_i].us = us;
     }
+#endif
 }
 
 /* Called at the end of every present. */
 static void spk_frame_end(u64 now)
 {
+#ifdef PORT_DBZ3_LIGHT_BUILD
+    (void)now;
+    return;
+#else
     const u64 frame_us = s_spk.last_present_us ? now - s_spk.last_present_us : 0;
     if (frame_us > SPK_FRAME_US && s_spk.lines < SPK_MAX_LINES) {
         if (!s_spk.f) s_spk.f = fopen("sdmc:/switch/dbz-budokai-3-switch/t29-spikes.log", "w");
@@ -504,6 +516,7 @@ static void spk_frame_end(u64 now)
     s_spk.wait_us = s_spk.fence_us = 0;
     s_spk.waits = s_spk.uploads = s_spk.readbacks = s_spk.tex_made = s_spk.pipes = 0;
     memset(s_spk.tag, 0, sizeof s_spk.tag);
+#endif
 }
 
 /* The GPU has finished everything: no set is in flight any more. */
@@ -1765,7 +1778,9 @@ static u32 be_pipeline_create(void* user, const char* vs_hlsl, const char* ps_hl
                "scripts/gen-deko3d-shaders.py\n",
                (unsigned long long)hv, vs < 0 ? " (missing)" : "",
                (unsigned long long)hp, ps < 0 ? " (missing)" : "", (int)rt_fmt);
+#ifdef PORT_DBZ3_SHADER_CAPTURE
         dk_dump_pipeline(vs_hlsl, ps_hlsl, rs, layout, vertex_stride, rt_fmt, rt_count);
+#endif
         return 0;
     }
     u32 slot = DK_MAX_PIPES;

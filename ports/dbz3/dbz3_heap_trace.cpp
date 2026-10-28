@@ -42,6 +42,10 @@ std::atomic<uint32_t> g_seq{0};
 
 void push(uint8_t op, uint32_t user, uint32_t lr, uint32_t file, uint32_t line)
 {
+#ifdef PORT_DBZ3_LIGHT_BUILD
+    (void)op; (void)user; (void)lr; (void)file; (void)line;
+    return;
+#else
     if (!user) return;
     const uint32_t s = g_seq.fetch_add(1, std::memory_order_relaxed);
     HeapEvent& e = g_ring[s & (kRing - 1)];
@@ -55,6 +59,7 @@ void push(uint8_t op, uint32_t user, uint32_t lr, uint32_t file, uint32_t line)
     e.lr = lr;
     e.task_fn = g_dbz3_cur_task_fn;
     e.file = file;
+#endif
 }
 
 void guest_str(uint32_t ea, char* out, int n)

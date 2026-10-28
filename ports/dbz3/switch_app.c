@@ -99,6 +99,7 @@ int ps3_switch_app_init(void)
     }
     /* A numeric delay in seconds arms one short per-pass GPU capture. Keep
      * this separate from diag.on: readback stalls make FPS measurements invalid. */
+#ifndef PORT_DBZ3_LIGHT_BUILD
     {
         FILE *capture = fopen("sdmc:/switch/dbz-budokai-3-switch/map-capture-after", "r");
         if (capture) {
@@ -118,6 +119,7 @@ int ps3_switch_app_init(void)
             fclose(capture);
         }
     }
+#endif
     sd_ready = 1;
     FILE *status = fopen(status_log, "w");
     if (status) {
