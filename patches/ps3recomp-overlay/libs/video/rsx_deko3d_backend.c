@@ -998,10 +998,10 @@ static void dk_stats_window(void)
     u32 ed[5];
     rsx_draw_engine_drops(ed);
     const u32* dr = g_dbz3_du_rejects;
-    /* Always on (diag.on is ignored by the lightweight build): the Namek
-     * terrain investigation needs these counts, one line per 300 presents. */
+    /* diag.on only (silent in the lightweight build): engine drop and DU
+     * reject counters, one line per 300 presents. */
     if (s_dk.st.presents % 300u == 0)
-        dk_err("[drops] presents=%u gpu_draws=%u skipped=%u guest_draws=%u "
+        dk_log("[drops] presents=%u gpu_draws=%u skipped=%u guest_draws=%u "
                "eng batch=%u fetch=%u topo=%u target=%u pipe=%u "
                "du node=%u derived=%u next=%u lookup=%u depth_clamp=%d\n",
                s_dk.st.presents, s_dk.st.gpu_draws, s_dk.st.draws_skipped,
