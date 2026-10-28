@@ -13,7 +13,7 @@ $SwitchBuild = @{
     LoopMetrics             = $false
     FrameClockMetrics       = $false
     # Keep shader dumps and capture code out of the FPS test build.
-    ShaderCapture           = $false
+    ShaderCapture           = $true
     ScreenshotCapture       = $false
     Logic60                 = $true
 }

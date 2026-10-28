@@ -126,6 +126,33 @@ def main() -> None:
                  "            goto loc_001D24F4;\n"
                  "        }\n"
                  "        { int64_t a = (int32_t)ctx->gpr[28];")
+    # A valid effects node can point at a malformed child table entry. On
+    # Switch, liftfast reads guest addresses directly when they fall in its
+    # broad fast range, so a freed 0x3... address can abort before vm_oob sees
+    # it. run48 hits this path in func_00021C6C with derived address 0x3F4952B2.
+    # Reject entries outside the guest's actually allocated regions and advance
+    # the current iterator, preserving the rest of the DU effect list.
+    replace_once(chunk0, "void func_00021C6C(ppu_context* ctx) {",
+                 "extern \"C\" uint32_t g_sys_mem_bump_ptr;\n"
+                 "static inline bool dbz3_du_effect_lookup_valid(uint32_t p) {\n"
+                 "    return !(p & 3u) && ((p >= 0x10000u && p <= 0x1FFFFFCCu) ||\n"
+                 "           (p >= 0x30000000u && p <= 0x301FFFCCu) ||\n"
+                 "           (p >= 0x40000000u && g_sys_mem_bump_ptr >= 0x40000034u &&\n"
+                 "            p <= g_sys_mem_bump_ptr - 0x34u) ||\n"
+                 "           (p >= 0xC0000000u && p <= 0xDFFFFFCCu));\n"
+                 "}\n"
+                 "void func_00021C6C(ppu_context* ctx) {")
+    replace_once(chunk0,
+                 "        ctx->gpr[3] = ppc_rldicl(ctx->gpr[3], 0, 32);\n"
+                 "        ctx->gpr[25] = vm_read32(ctx->gpr[3] + 0x0);",
+                 "        ctx->gpr[3] = ppc_rldicl(ctx->gpr[3], 0, 32);\n"
+                 "        if (!dbz3_du_effect_lookup_valid((uint32_t)ctx->gpr[3])) {\n"
+                 "            static unsigned bad_lookup = 0;\n"
+                 "            if (bad_lookup++ < 8u) fprintf(stderr, \"[du-effect] invalid lookup=0x%08X container=0x%08X index=%u\\n\",\n"
+                 "                                              (uint32_t)ctx->gpr[3], (uint32_t)ctx->gpr[27], (uint32_t)ctx->gpr[24]);\n"
+                 "            goto loc_00021F4C;\n"
+                 "        }\n"
+                 "        ctx->gpr[25] = vm_read32(ctx->gpr[3] + 0x0);")
     make_include(args.recompiled / "ppu_recomp_003.cpp", ("00216DB4",),
                  args.includes / "dbz3_crierr_lifted.inc")
     make_include(chunk0, ("0001D294", "0001D4D8"),

@@ -51,6 +51,10 @@ static atomic_int debug_reboot;
 static atomic_int debug_reboot_error;
 static atomic_int debug_screenshot;
 static atomic_int debug_recording;
+static atomic_int debug_draw_capture;
+static atomic_int debug_draw_start;
+static atomic_int debug_draw_step = 8;
+static atomic_int debug_gpu_aa;
 static int debug_active_scale;
 static u64 debug_old_buttons;
 static int debug_suppress_until_release;
@@ -59,7 +63,7 @@ void switch_debug_init(void)
 {
     int expected = 0;
     if (atomic_compare_exchange_strong(&debug_init_state, &expected, 1)) {
-        int scale = 10, fps = 1, frame_ms = 0;
+        int scale = 10, fps = 1, frame_ms = 0, gpu_aa = 0;
         FILE *f = fopen(DEBUG_SETTINGS_PATH, "r");
         if (f) {
             char line[80];
@@ -69,6 +73,7 @@ void switch_debug_init(void)
                     scale = value;
                 else if (sscanf(line, "show_fps=%d", &value) == 1) fps = !!value;
                 else if (sscanf(line, "show_frame_ms=%d", &value) == 1) frame_ms = !!value;
+                else if (sscanf(line, "gpu_fxaa=%d", &value) == 1) gpu_aa = !!value;
             }
             fclose(f);
         } else {
@@ -80,6 +85,7 @@ void switch_debug_init(void)
         atomic_store(&debug_scale, scale);
         atomic_store(&debug_fps, fps);
         atomic_store(&debug_frame_ms, frame_ms);
+        atomic_store(&debug_gpu_aa, gpu_aa);
         atomic_store(&debug_init_state, 2);
     } else {
         while (atomic_load(&debug_init_state) != 2) svcSleepThread(1000000);
@@ -90,8 +96,9 @@ static void switch_debug_save(void)
 {
     FILE *f = fopen(DEBUG_SETTINGS_PATH ".tmp", "w");
     if (!f) return;
-    fprintf(f, "render_scale_tenths=%d\nshow_fps=%d\nshow_frame_ms=%d\n",
-            atomic_load(&debug_scale), atomic_load(&debug_fps), atomic_load(&debug_frame_ms));
+    fprintf(f, "render_scale_tenths=%d\nshow_fps=%d\nshow_frame_ms=%d\ngpu_fxaa=%d\n",
+            atomic_load(&debug_scale), atomic_load(&debug_fps), atomic_load(&debug_frame_ms),
+            atomic_load(&debug_gpu_aa));
     if (fclose(f) != 0) return;
     remove(DEBUG_SETTINGS_PATH);
     rename(DEBUG_SETTINGS_PATH ".tmp", DEBUG_SETTINGS_PATH);
@@ -104,7 +111,9 @@ SwitchDebugSettings switch_debug_snapshot(void)
         atomic_load(&debug_scale), debug_active_scale,
         atomic_load(&debug_fps), atomic_load(&debug_frame_ms),
         atomic_load(&debug_menu), atomic_load(&debug_selected),
-        atomic_load(&debug_reboot_error), atomic_load(&debug_recording)
+        atomic_load(&debug_reboot_error), atomic_load(&debug_recording),
+        atomic_load(&debug_draw_start), atomic_load(&debug_draw_step),
+        atomic_load(&debug_gpu_aa)
     };
     return s;
 }
@@ -123,13 +132,14 @@ int switch_debug_input(uint64_t buttons)
     }
     if (atomic_load(&debug_menu)) {
         int row = atomic_load(&debug_selected);
-        if (pressed & HidNpadButton_Up) row = (row + 6) % 7;
-        if (pressed & HidNpadButton_Down) row = (row + 1) % 7;
+        if (pressed & HidNpadButton_Up) row = (row + 10) % 11;
+        if (pressed & HidNpadButton_Down) row = (row + 1) % 11;
         atomic_store(&debug_selected, row);
         if (pressed & HidNpadButton_B) {
             atomic_store(&debug_menu, 0);
             debug_suppress_until_release = 1;
-        } else if (pressed & (HidNpadButton_Left | HidNpadButton_Right | HidNpadButton_A)) {
+        } else if (pressed & (HidNpadButton_Left | HidNpadButton_Right |
+                              HidNpadButton_A | HidNpadButton_ZL | HidNpadButton_ZR)) {
             int delta = (pressed & HidNpadButton_Left) ? -1 : 1;
             if (row == 0) {
                 int scale = atomic_load(&debug_scale) + delta;
@@ -149,11 +159,26 @@ int switch_debug_input(uint64_t buttons)
                 atomic_store(&debug_recording, !atomic_load(&debug_recording));
                 atomic_store(&debug_menu, 0);
                 debug_suppress_until_release = 1;
-            } else if (row == 5 && (pressed & HidNpadButton_A)) {
-                atomic_store(&debug_reboot, 1);
-            } else if (row == 6 && (pressed & HidNpadButton_A)) {
+            } else if (row == 5) {
+                if (pressed & HidNpadButton_ZL) delta = -1;
+                int amount = (pressed & (HidNpadButton_ZL | HidNpadButton_ZR))
+                    ? 128 : atomic_load(&debug_draw_step);
+                int start = atomic_load(&debug_draw_start) + delta * amount;
+                if (start >= 0 && start <= 8192) atomic_store(&debug_draw_start, start);
+            } else if (row == 6) {
+                atomic_store(&debug_draw_step, atomic_load(&debug_draw_step) == 8 ? 1 : 8);
+            } else if (row == 7 && (pressed & HidNpadButton_A)) {
+                atomic_store(&debug_draw_capture, 1);
                 atomic_store(&debug_menu, 0);
                 debug_suppress_until_release = 1;
+            } else if (row == 8 && (pressed & HidNpadButton_A)) {
+                atomic_store(&debug_reboot, 1);
+            } else if (row == 9 && (pressed & HidNpadButton_A)) {
+                atomic_store(&debug_menu, 0);
+                debug_suppress_until_release = 1;
+            } else if (row == 10) {
+                atomic_store(&debug_gpu_aa, !atomic_load(&debug_gpu_aa));
+                switch_debug_save();
             }
         }
         return 1;
@@ -170,6 +195,13 @@ void switch_debug_reboot_failed(int result) { atomic_store(&debug_reboot_error, 
 int switch_debug_take_screenshot(void) { return atomic_exchange(&debug_screenshot, 0); }
 int switch_debug_recording(void) { return atomic_load(&debug_recording); }
 void switch_debug_stop_recording(void) { atomic_store(&debug_recording, 0); }
+int switch_debug_take_draw_capture(int *start, int *step)
+{
+    if (!atomic_exchange(&debug_draw_capture, 0)) return 0;
+    if (start) *start = atomic_load(&debug_draw_start);
+    if (step) *step = atomic_load(&debug_draw_step);
+    return 1;
+}
 
 static void switch_input_read_native(Ps3PlatformPadState pads[PS3_PLATFORM_PAD_COUNT])
 {

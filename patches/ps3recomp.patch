@@ -3719,7 +3719,7 @@ index b438d87..b1b8ca7 100644
          }
          if (base_fmt == RSX_TEX_FMT_DEPTH24_D8) {
              for (u32 i = 0; i < g.n_zdepths; i++)
-@@ -2057,10 +2837,279 @@ static void pd_present(u32 presented)
+@@ -2057,10 +2837,348 @@ static void pd_present(u32 presented)
      }
  }
  
@@ -3789,6 +3789,8 @@ index b438d87..b1b8ca7 100644
 +        u32 location, offset, format, width, height, pitch;
 +    } dumped[64];
 +    u32 dumped_count, dumped_bytes;
++    u64 dumped_fp_hash[64], dumped_vp_hash[64];
++    u32 dumped_fp_count, dumped_vp_count;
 +} s_draw_capture;
 +
 +static void draw_capture_arm(void)
@@ -3810,6 +3812,7 @@ index b438d87..b1b8ca7 100644
 +    s_draw_capture.frame = g.frames;
 +    s_draw_capture.draw = s_draw_capture.shots = 0;
 +    s_draw_capture.dumped_count = s_draw_capture.dumped_bytes = 0;
++    s_draw_capture.dumped_fp_count = s_draw_capture.dumped_vp_count = 0;
 +    s_draw_capture.start = start >= 0 ? (u32)start : 0u;
 +    s_draw_capture.step = step == 1 ? 1u : 8u;
 +    fprintf(s_draw_capture.log, "frame %u; start %u; step %u; max 16 checkpoints\n",
@@ -3841,6 +3844,72 @@ index b438d87..b1b8ca7 100644
 +            (unsigned long long)(s_cur_vp ? s_cur_vp->hash : 0),
 +            s_cur_fp ? s_cur_fp->off : 0,
 +            (unsigned long long)(s_cur_fp ? s_cur_fp->shash : 0));
++    /* Positions let offline review group terrain draws into spatial tiles. */
++    for (u32 sl = 0; sl < layout->count; sl++) if (layout->attrs[sl] == 0u) {
++        float lo[3] = { 3.402823466e+38f, 3.402823466e+38f, 3.402823466e+38f };
++        float hi[3] = { -3.402823466e+38f, -3.402823466e+38f, -3.402823466e+38f };
++        for (u32 v = 0; v < dc.n_verts; v++) {
++            const float* p = (const float*)(dc.verts_view + (size_t)v * layout->stride + sl * 16u);
++            for (u32 k = 0; k < 3u; k++) {
++                if (p[k] < lo[k]) lo[k] = p[k];
++                if (p[k] > hi[k]) hi[k] = p[k];
++            }
++        }
++        fprintf(f, " a0_bbox=%.6g,%.6g,%.6g..%.6g,%.6g,%.6g",
++                lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
++        break;
++    }
++    /* Preserve unique vertex programs and the active 14-constant body
++     * fragment program from this explicit one-frame capture. */
++    if (s_cur_fp && s_cur_fp->bytes && s_cur_fp->size && s_cur_fp->size <= 16384u &&
++        g.fp_constants.count == 14u) {
++        fprintf(f, " fp_size=%u fp_const_count=%u", s_cur_fp->size, g.fp_constants.count);
++        for (u32 c = 0; c < g.fp_constants.count; c++) {
++            float v[4];
++            memcpy(v, g.fp_constants.values[c], sizeof v);
++            fprintf(f, " c%u=%.6g,%.6g,%.6g,%.6g", c, v[0], v[1], v[2], v[3]);
++        }
++        u32 seen = 0;
++        while (seen < s_draw_capture.dumped_fp_count &&
++               s_draw_capture.dumped_fp_hash[seen] != s_cur_fp->shash) seen++;
++        if (seen == s_draw_capture.dumped_fp_count && seen < 64u) {
++            char code_path[400];
++            snprintf(code_path, sizeof code_path, "%s/fp_%08X_%016llX.bin",
++                     s_draw_capture.dir, s_cur_fp->off,
++                     (unsigned long long)s_cur_fp->shash);
++            FILE* code = fopen(code_path, "wb");
++            if (code) {
++                const u32 wrote = (u32)fwrite(s_cur_fp->bytes, 1, s_cur_fp->size, code);
++                fclose(code);
++                if (wrote == s_cur_fp->size) {
++                    s_draw_capture.dumped_fp_hash[s_draw_capture.dumped_fp_count++] = s_cur_fp->shash;
++                    fprintf(f, " fp_raw=fp_%08X_%016llX.bin", s_cur_fp->off,
++                            (unsigned long long)s_cur_fp->shash);
++                } else remove(code_path);
++            }
++        }
++    }
++    if (s_cur_vp && s_cur_vp->instrs && s_cur_vp->instrs <= 4096u) {
++        u32 seen = 0;
++        while (seen < s_draw_capture.dumped_vp_count &&
++               s_draw_capture.dumped_vp_hash[seen] != s_cur_vp->hash) seen++;
++        if (seen == s_draw_capture.dumped_vp_count && seen < 64u) {
++            const u32 bytes = s_cur_vp->instrs * 16u;
++            char code_path[400];
++            snprintf(code_path, sizeof code_path, "%s/vp_%016llX.bin",
++                     s_draw_capture.dir, (unsigned long long)s_cur_vp->hash);
++            FILE* code = fopen(code_path, "wb");
++            if (code) {
++                const u32 wrote = (u32)fwrite(g.rsx.vp + s_cur_vp->start * 4u, 1, bytes, code);
++                fclose(code);
++                if (wrote == bytes) {
++                    s_draw_capture.dumped_vp_hash[s_draw_capture.dumped_vp_count++] = s_cur_vp->hash;
++                    fprintf(f, " vp_raw=vp_%016llX.bin vp_bytes=%u",
++                            (unsigned long long)s_cur_vp->hash, bytes);
++                } else remove(code_path);
++            }
++        }
++    }
 +    for (u32 sl = 0; sl < layout->count; sl++) if (layout->attrs[sl] == 3u) {
 +        float min_rgb = 1.0f, max_rgb = 0.0f;
 +        u32 dark = 0;
@@ -3999,7 +4068,7 @@ index b438d87..b1b8ca7 100644
  
      const u32 prim = g.rsx.current_primitive;
      /* Everything that becomes triangles -- lists, strips, fans, quads, quad
-@@ -2082,7 +3131,36 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -2082,7 +3200,36 @@ static void sink_end(void* user, const rsx_dispatch* r)
  
      rsx_vertex_layout_plan layout;
      eng_vertex_layout(&layout);
@@ -4037,7 +4106,7 @@ index b438d87..b1b8ca7 100644
      if (!dc.n_verts || !dc.fetch_ok) return;
  
      int indexed = 0;
-@@ -2091,7 +3169,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -2091,7 +3238,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
          if (!eng_topology_rebuild(prim, dc.refs_remapped, &indexed)) return;
          n_draw = indexed
              ? rsx_draw_engine_topology_index_count(prim, dc.n_source_refs,
@@ -4046,7 +4115,7 @@ index b438d87..b1b8ca7 100644
              : dc.n_source_refs - dc.n_source_refs % 3u;
      }
      if (!n_draw) return;
-@@ -2110,6 +3188,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -2110,6 +3257,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
      rsx_dsp_get_viewport(&g.rsx, &vp);
      const u32 zslot = eng_zdepth_get(sf.zeta_location, sf.zeta_offset,
                                       sf.clip_w, sf.clip_h);
@@ -4054,7 +4123,7 @@ index b438d87..b1b8ca7 100644
  
      /* A guest program pair that will not translate has no fallback: the draw
       * is dropped, as the reference engine drops it. Substituting the built-in
-@@ -2120,6 +3199,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -2120,6 +3268,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
      const u32 pipeline = eng_pipeline_get(&layout, &rs,
                                            eng_surface_format(sf.color_format),
                                            n_targets, &pipeline_is_fixed, &tex_used);
@@ -4062,7 +4131,7 @@ index b438d87..b1b8ca7 100644
      if (!pipeline) return;
  
      /* Textures before any pipeline or target binding: a cache refresh can
-@@ -2136,12 +3216,13 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -2136,12 +3285,13 @@ static void sink_end(void* user, const rsx_dispatch* r)
                                              textures, samplers);
      const u32 vtex_mask = sink_bind_vertex_textures(eng_vtex_mask(), vtextures,
                                                      vsamplers);
@@ -4078,7 +4147,7 @@ index b438d87..b1b8ca7 100644
              g.indices);
      }
  
-@@ -2179,6 +3260,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -2179,6 +3329,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
        alpha[0] = rsx_fp_alpha_ref(rs.alpha_ref_raw, rs.alpha_ref_format);
        alpha[1] = alpha[2] = alpha[3] = 0.0f; }
  
@@ -4086,7 +4155,7 @@ index b438d87..b1b8ca7 100644
      pd_note(targets, n_targets, zslot, &rs, pipeline, tex_mask);
  
      /* The depth attachment is cleared the first time it is bound, so a title
-@@ -2229,8 +3311,14 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -2229,8 +3380,14 @@ static void sink_end(void* user, const rsx_dispatch* r)
                            rsx_dsp_reg(&g.rsx, M_STENCIL_FUNC_REF) & 0xFFu);
  
      const u32 uploaded = indexed ? dc.n_verts : n_draw;
@@ -4102,7 +4171,7 @@ index b438d87..b1b8ca7 100644
      /* Counted only when the draw ran the guest's OWN programs, which is what
       * the test hook means: a draw through the built-in pair is a draw, not
       * evidence that the decompile-translate-compile path worked. */
-@@ -2241,6 +3329,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -2241,6 +3398,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
          g.zdepths[zslot].had_write = 1;
          eng_zdepth_wrote(zslot, &sf);
      }
@@ -4110,7 +4179,7 @@ index b438d87..b1b8ca7 100644
  }
  
  static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
-@@ -2328,6 +3417,9 @@ static void eng_present(u32 buffer_id)
+@@ -2328,6 +3486,9 @@ static void eng_present(u32 buffer_id)
      if (!g.ready) return;
      const u32 target = eng_present_surface(buffer_id);
      if (target == ENG_INVALID) return;
@@ -4120,7 +4189,7 @@ index b438d87..b1b8ca7 100644
      if (getenv("PS3RECOMP_METAL_FRAME_DUMP") && g.frames % 120 == 0) {
          u32 current = eng_current_surface();
          fprintf(stderr, "[rsx capture] frame=%u buffer=%u selected=%u current=%u draws=%u surfaces=%u\n",
-@@ -2341,6 +3433,10 @@ static void eng_present(u32 buffer_id)
+@@ -2341,6 +3502,10 @@ static void eng_present(u32 buffer_id)
      g.last_present_surface = target;
      g.be->present(g.be->user, g.surfaces[target].handle);
      g.frames++;
@@ -4131,7 +4200,7 @@ index b438d87..b1b8ca7 100644
      g.last_guest_draws = g.guest_draws;
      g.guest_draws = 0;
  }
-@@ -2450,6 +3546,13 @@ void rsx_draw_engine_method(u32 method, u32 arg)
+@@ -2450,6 +3615,13 @@ void rsx_draw_engine_method(u32 method, u32 arg)
      rsx_dispatch_method(&g.rsx, m, arg);
  }
  

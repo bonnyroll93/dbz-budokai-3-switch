@@ -150,7 +150,8 @@ static u64 dk_hash_str(const char* s)
 static void dk_dump_pipeline(const char* vs_hlsl, const char* ps_hlsl,
                              const rsx_be_render_state* rs,
                              const rsx_vertex_layout_plan* layout,
-                             u32 vertex_stride, rsx_be_format rt_fmt, u32 rt_count)
+                             u32 vertex_stride, rsx_be_format rt_fmt, u32 rt_count,
+                             u32 pipeline_handle)
 {
     /* Always on, even with diagnostics off: it writes each distinct pipeline
      * once, and these dumps are the only way a missing shader ("pipeline
@@ -161,20 +162,22 @@ static void dk_dump_pipeline(const char* vs_hlsl, const char* ps_hlsl,
     static u32 dumped = 0;
     const u64 hv = dk_hash_str(vs_hlsl), hp = dk_hash_str(ps_hlsl);
     const u64 key = hv ^ (hp * 0x9E3779B97F4A7C15ull);
-    for (u32 i = 0; i < dumped; i++) if (seen[i] == key) return;
-    if (dumped >= 512) return;
-    seen[dumped] = key;
+    int is_new = 1;
+    for (u32 i = 0; i < dumped; i++) if (seen[i] == key) { is_new = 0; break; }
     mkdir(DK_SHADER_DUMP_DIR, 0777);
     char path[256];
     FILE* f;
-    snprintf(path, sizeof path, DK_SHADER_DUMP_DIR "/vs_%016llx.hlsl", (unsigned long long)hv);
-    if ((f = fopen(path, "w"))) { fputs(vs_hlsl ? vs_hlsl : "", f); fclose(f); }
-    snprintf(path, sizeof path, DK_SHADER_DUMP_DIR "/ps_%016llx.hlsl", (unsigned long long)hp);
-    if ((f = fopen(path, "w"))) { fputs(ps_hlsl ? ps_hlsl : "", f); fclose(f); }
+    if (is_new && dumped < 512) {
+        seen[dumped++] = key;
+        snprintf(path, sizeof path, DK_SHADER_DUMP_DIR "/vs_%016llx.hlsl", (unsigned long long)hv);
+        if ((f = fopen(path, "w"))) { fputs(vs_hlsl ? vs_hlsl : "", f); fclose(f); }
+        snprintf(path, sizeof path, DK_SHADER_DUMP_DIR "/ps_%016llx.hlsl", (unsigned long long)hp);
+        if ((f = fopen(path, "w"))) { fputs(ps_hlsl ? ps_hlsl : "", f); fclose(f); }
+    }
     snprintf(path, sizeof path, DK_SHADER_DUMP_DIR "/pipelines.txt");
     if ((f = fopen(path, "a"))) {
-        fprintf(f, "pipeline vs=%016llx ps=%016llx stride=%u rt_fmt=%d rt_count=%u\n",
-                (unsigned long long)hv, (unsigned long long)hp, vertex_stride,
+        fprintf(f, "pipeline handle=%u vs=%016llx ps=%016llx stride=%u rt_fmt=%d rt_count=%u\n",
+                pipeline_handle, (unsigned long long)hv, (unsigned long long)hp, vertex_stride,
                 (int)rt_fmt, rt_count);
         if (layout) {
             fprintf(f, "  layout mask=%04x stride=%u count=%u attrs=", layout->mask,
@@ -196,9 +199,8 @@ static void dk_dump_pipeline(const char* vs_hlsl, const char* ps_hlsl,
         }
         fclose(f);
     }
-    dumped++;
-    dk_log("pipeline dumped: vs=%016llx ps=%016llx stride=%u attrs=%u\n",
-           (unsigned long long)hv, (unsigned long long)hp, vertex_stride,
+    dk_log("pipeline mapped: handle=%u vs=%016llx ps=%016llx stride=%u attrs=%u\n",
+           pipeline_handle, (unsigned long long)hv, (unsigned long long)hp, vertex_stride,
            layout ? layout->count : 0u);
 }
 
@@ -1107,7 +1109,7 @@ static void dk_draw_debug_menu(const SwitchDebugSettings* settings, u32 fps_x10,
 {
     const u32 px = s_dk.width >= 1920 ? 4u : 3u;
     const u32 x = 24u, y = 58u, line = 9u * px;
-    const u32 box_w = 220u * px, box_h = 135u * px;
+    const u32 box_w = 220u * px, box_h = 190u * px;
     DkScissor bg = { x, y, box_w, box_h };
     dkCmdBufSetScissors(s_dk.cmd, 0, &bg, 1);
     dkCmdBufClearColorFloat(s_dk.cmd, 0, DkColorMask_RGBA, 0.04f, 0.06f, 0.12f, 1.0f);
@@ -1115,8 +1117,8 @@ static void dk_draw_debug_menu(const SwitchDebugSettings* settings, u32 fps_x10,
     dk_debug_text(x + 3u * px, y + 3u * px, "DEBUG MENU", px, 0.2f, 1.0f, 0.4f);
     dk_debug_text(x + 3u * px, y + 3u * px + line, "UP DOWN SELECT  LEFT RIGHT CHANGE  A ENTER  B CLOSE", px,
                   0.7f, 0.8f, 1.0f);
-    const char* labels[7];
-    char scale[80], fps[80], ms[80];
+    const char* labels[11];
+    char scale[80], fps[80], ms[80], draw_start[80], draw_step[80], gpu_aa[80];
     snprintf(scale, sizeof scale, "RENDER SCALE: %d.%d  ACTIVE: %d.%d%s",
              settings->scale_tenths / 10, settings->scale_tenths % 10,
              settings->active_scale_tenths / 10, settings->active_scale_tenths % 10,
@@ -1126,8 +1128,14 @@ static void dk_draw_debug_menu(const SwitchDebugSettings* settings, u32 fps_x10,
     labels[0] = scale; labels[1] = fps; labels[2] = ms;
     labels[3] = "SAVE SCREENSHOT";
     labels[4] = settings->recording ? "STOP SCREEN RECORDING" : "START SCREEN RECORDING";
-    labels[5] = "REBOOT APPLICATION"; labels[6] = "CLOSE MENU";
-    for (int i = 0; i < 7; i++) {
+    snprintf(draw_start, sizeof draw_start, "DRAW START: %d  LEFT RIGHT STEP  ZL ZR 128", settings->draw_start);
+    snprintf(draw_step, sizeof draw_step, "DRAW STEP: %d  CHANGE 8/1", settings->draw_step);
+    labels[5] = draw_start; labels[6] = draw_step;
+    labels[7] = "CAPTURE NEXT DRAW FRAME";
+    labels[8] = "REBOOT APPLICATION"; labels[9] = "CLOSE MENU";
+    snprintf(gpu_aa, sizeof gpu_aa, "GPU FXAA: %s", settings->gpu_aa ? "ON" : "OFF");
+    labels[10] = gpu_aa;
+    for (int i = 0; i < 11; i++) {
         u32 yy = y + 3u * px + (u32)(i + 3) * line;
         dk_debug_text(x + 3u * px, yy, i == settings->selected ? ">" : " ", px,
                       0.2f, 1.0f, 0.4f);
@@ -1135,10 +1143,10 @@ static void dk_draw_debug_menu(const SwitchDebugSettings* settings, u32 fps_x10,
     }
     snprintf(label, sizeof label, "PRESENT FPS: %u.%u  FRAME: %u.%u MS",
              fps_x10 / 10u, fps_x10 % 10u, frame_ms_x10 / 10u, frame_ms_x10 % 10u);
-    dk_debug_text(x + 3u * px, y + 3u * px + 11u * line, label, px, 0.2f, 1.0f, 0.4f);
+    dk_debug_text(x + 3u * px, y + 3u * px + 14u * line, label, px, 0.2f, 1.0f, 0.4f);
     if (settings->reboot_error) {
         snprintf(label, sizeof label, "REBOOT FAILED: %08X", (unsigned)settings->reboot_error);
-        dk_debug_text(x + 3u * px, y + 3u * px + 12u * line, label, px, 1.0f, 0.3f, 0.3f);
+        dk_debug_text(x + 3u * px, y + 3u * px + 15u * line, label, px, 1.0f, 0.3f, 0.3f);
     }
 }
 
@@ -1146,6 +1154,8 @@ static void dk_tex_pend_collect(u32 done);   /* deferred texture release, below 
 static u32 s_present_serial;
 static u8 *s_capture_pixels;
 static size_t s_capture_capacity;
+static int dk_ring_alloc(u32 size, u32 align, u32* off);
+static int dk_fxaa_present(u32 surface, DkImageView const* dst);
 
 static void be_present(void* user, u32 surface)
 {
@@ -1175,6 +1185,7 @@ static void be_present(void* user, u32 surface)
     const int have_src = surface && surface <= DK_MAX_SURFACES &&
                          s_dk.surfaces[surface].used &&
                          s_dk.surfaces[surface].fmt == RSX_BE_FMT_R8G8B8A8;
+    SwitchDebugSettings settings = switch_debug_snapshot();
     if (have_src && dbz3_capture_wants_frame && dbz3_capture_frame &&
         dbz3_capture_wants_frame(t0)) {
         dk_target *t = &s_dk.surfaces[surface];
@@ -1210,14 +1221,16 @@ static void be_present(void* user, u32 surface)
     DkImageView const* dsts[1] = { &dst };
     if (have_src) {
         dk_target* t = &s_dk.surfaces[surface];
-        DkImageView src;
-        dkImageViewDefaults(&src, &t->image);
-        DkImageRect sr = { 0, 0, 0, t->w, t->h, 1 };
-        DkImageRect dr = { 0, 0, 0, s_dk.width, s_dk.height, 1 };
-        dk_full_barrier();
-        dkCmdBufBlitImage(s_dk.cmd, &src, &sr, &dst, &dr,
-                          DkBlitFlag_FilterLinear | DkBlitFlag_ModeBlit, 0);
-        dk_full_barrier();
+        if (!settings.gpu_aa || !dk_fxaa_present(surface, &dst)) {
+            DkImageView src;
+            dkImageViewDefaults(&src, &t->image);
+            DkImageRect sr = { 0, 0, 0, t->w, t->h, 1 };
+            DkImageRect dr = { 0, 0, 0, s_dk.width, s_dk.height, 1 };
+            dk_full_barrier();
+            dkCmdBufBlitImage(s_dk.cmd, &src, &sr, &dst, &dr,
+                              DkBlitFlag_FilterLinear | DkBlitFlag_ModeBlit, 0);
+            dk_full_barrier();
+        }
         /* The guest clears with alpha 0; the display layer must be opaque. */
         dkCmdBufBindRenderTargets(s_dk.cmd, dsts, 1, NULL);
         DkScissor sc = { 0, 0, s_dk.width, s_dk.height };
@@ -1240,7 +1253,6 @@ static void be_present(void* user, u32 surface)
           fps_x10 = (u32)((u64)window_count * 10000000u / (now - window_start));
           window_count = 0; window_start = now;
       }
-      SwitchDebugSettings settings = switch_debug_snapshot();
       if (settings.show_fps) dk_draw_fps_overlay();
       if (settings.show_frame_ms) {
           char ms[32];
@@ -1314,8 +1326,13 @@ static DkWrapMode dk_wrap(u32 w)
     switch (w & 0xFu) {
     case 1:  return DkWrapMode_Repeat;
     case 2:  return DkWrapMode_MirroredRepeat;
+    case 3:  return DkWrapMode_ClampToEdge;
     case 4:  return DkWrapMode_ClampToBorder;
-    default: return DkWrapMode_ClampToEdge;      /* 3, 5..8, unset */
+    case 5:  return DkWrapMode_Clamp;
+    case 6:  return DkWrapMode_MirrorClampToEdge;
+    case 7:  return DkWrapMode_MirrorClampToBorder;
+    case 8:  return DkWrapMode_MirrorClamp;
+    default: return DkWrapMode_ClampToEdge;
     }
 }
 
@@ -1710,6 +1727,69 @@ static int dk_shader_get(u64 hash, int stage)
     return -1;
 }
 
+/* FXAA is a GPU fullscreen pass on the presented RSX target. The pass is
+ * opt-in because it costs another shader pass each frame; the debug menu
+ * persists the choice in debug-settings.cfg. */
+static int dk_fxaa_present(u32 surface, DkImageView const* dst)
+{
+    const int vs = dk_shader_get(RSX_DK_FXAA_VS_HASH, 0);
+    const int ps = dk_shader_get(RSX_DK_FXAA_PS_HASH, 1);
+    if (vs < 0 || ps < 0 || !surface || surface > DK_MAX_SURFACES ||
+        !s_dk.surfaces[surface].used) return 0;
+
+    u32 psoff;
+    if (dk_ring_alloc(16u, DK_UNIFORM_BUF_ALIGNMENT, &psoff)) return 0;
+    float* aa = (float*)((u8*)dkMemBlockGetCpuAddr(s_dk.mem_ring) + psoff);
+    aa[0] = 1.0f / (float)s_dk.surfaces[surface].w;
+    aa[1] = 1.0f / (float)s_dk.surfaces[surface].h;
+    aa[2] = aa[3] = 0.0f;
+
+    dkCmdBufBarrier(s_dk.cmd, DkBarrier_Fragments,
+                    DkInvalidateFlags_Image | DkInvalidateFlags_L2Cache);
+    DkImageView const* render_targets[1] = { dst };
+    dkCmdBufBindRenderTargets(s_dk.cmd, render_targets, 1, NULL);
+    DkViewport vp = { 0.0f, 0.0f, (float)s_dk.width, (float)s_dk.height, 0.0f, 1.0f };
+    DkScissor sc = { 0, 0, s_dk.width, s_dk.height };
+    dkCmdBufSetViewports(s_dk.cmd, 0, &vp, 1);
+    dkCmdBufSetScissors(s_dk.cmd, 0, &sc, 1);
+
+    DkShader const* shaders[2] = { &s_dk.shaders[vs], &s_dk.shaders[ps] };
+    dkCmdBufBindShaders(s_dk.cmd, DkStageFlag_GraphicsMask, shaders, 2);
+    DkRasterizerState raster;
+    dkRasterizerStateDefaults(&raster);
+    raster.cullMode = DkFace_None;
+    dkCmdBufBindRasterizerState(s_dk.cmd, &raster);
+    DkColorState color;
+    dkColorStateDefaults(&color);
+    dkCmdBufBindColorState(s_dk.cmd, &color);
+    DkColorWriteState write;
+    dkColorWriteStateDefaults(&write);
+    dkColorWriteStateSetMask(&write, 0, DkColorMask_RGBA);
+    dkCmdBufBindColorWriteState(s_dk.cmd, &write);
+    DkBlendState blend;
+    dkBlendStateDefaults(&blend);
+    dkCmdBufBindBlendState(s_dk.cmd, 0, &blend);
+    DkDepthStencilState depth;
+    dkDepthStencilStateDefaults(&depth);
+    dkCmdBufBindDepthStencilState(s_dk.cmd, &depth);
+
+    DkResHandle textures[16];
+    for (u32 i = 0; i < 16; i++)
+        textures[i] = dkMakeTextureHandle(i == 0 ? surface : DK_DUMMY_SLOT, 0);
+    dkCmdBufBindTextures(s_dk.cmd, DkStage_Fragment, 0, textures, 16);
+    const DkGpuAddr gpu = dkMemBlockGetGpuAddr(s_dk.mem_ring);
+    dkCmdBufBindUniformBuffer(s_dk.cmd, DkStage_Fragment, 1, gpu + psoff, 16u);
+    dkCmdBufDraw(s_dk.cmd, DkPrimitive_Triangles, 3, 1, 0, 0);
+    dk_full_barrier();
+
+    /* The guest draw cache must not assume its state survived this pass. */
+    memset(&s_dk.recorded, 0, sizeof s_dk.recorded);
+    s_dk.st.gpu_draws++;
+    s_dk.st.blits++;
+    dk_note_op();
+    return 1;
+}
+
 static DkBlendFactor dk_blend_factor(u32 f)
 {
     switch (f) {
@@ -1779,7 +1859,7 @@ static u32 be_pipeline_create(void* user, const char* vs_hlsl, const char* ps_hl
                (unsigned long long)hv, vs < 0 ? " (missing)" : "",
                (unsigned long long)hp, ps < 0 ? " (missing)" : "", (int)rt_fmt);
 #ifdef PORT_DBZ3_SHADER_CAPTURE
-        dk_dump_pipeline(vs_hlsl, ps_hlsl, rs, layout, vertex_stride, rt_fmt, rt_count);
+        dk_dump_pipeline(vs_hlsl, ps_hlsl, rs, layout, vertex_stride, rt_fmt, rt_count, 0);
 #endif
         return 0;
     }
@@ -1877,6 +1957,11 @@ static u32 be_pipeline_create(void* user, const char* vs_hlsl, const char* ps_hl
     P->used = 1;
     s_dk.st.pipelines_made++;
     s_spk.pipes++;
+#ifdef PORT_DBZ3_SHADER_CAPTURE
+    /* Map the RSX draw capture's backend handle to its generated HLSL. */
+    dk_dump_pipeline(vs_hlsl, ps_hlsl, rs, layout, vertex_stride, rt_fmt, rt_count,
+                     slot + 1u);
+#endif
     /* Pair pass-dump pipeline IDs with the precompiled shader sources. */
     {
         static FILE* map;

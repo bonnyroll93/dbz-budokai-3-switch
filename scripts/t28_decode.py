@@ -3,7 +3,11 @@
 into PNGs next to them, plus an enlarged copy and the colour/alpha split.
 Usage: python scripts/t28_decode.py build/logs/dbz3/dev/runNN/t28-tex"""
 import re, struct, sys, pathlib
-from PIL import Image
+import subprocess
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
 
 def c565(c):
     return ((c >> 11) * 255 // 31, ((c >> 5) & 63) * 255 // 63, (c & 31) * 255 // 31)
@@ -53,6 +57,26 @@ def main(d):
         fmt, w, h = int(m[3], 16), int(m[4]), int(m[5])
         if (fmt & ~0x60) not in (0x86, 0x87, 0x88):
             print(f.name, 'format not decoded'); continue
+        if Image is None:
+            base = fmt & ~0x60
+            fourcc = {0x86: b'DXT1', 0x87: b'DXT3', 0x88: b'DXT5'}[base]
+            payload = f.read_bytes()
+            flags = 0x00081007  # CAPS | HEIGHT | WIDTH | PIXELFORMAT | LINEARSIZE
+            header = struct.pack('<7I', 124, flags, h, w, len(payload), 0, 0)
+            header += bytes(44)  # reserved1[11]
+            header += struct.pack('<8I', 32, 4, int.from_bytes(fourcc, 'little'),
+                                  0, 0, 0, 0, 0)
+            header += struct.pack('<5I', 0x1000, 0, 0, 0, 0)
+            dds = f.with_suffix('.dds')
+            png = f.with_suffix('.png')
+            dds.write_bytes(b'DDS ' + header + payload)
+            try:
+                subprocess.run(['ffmpeg', '-y', '-v', 'error', '-i', str(dds),
+                                 str(png)], check=True)
+            finally:
+                dds.unlink(missing_ok=True)
+            print(f.name, '->', png.name, '(FFmpeg)')
+            continue
         img = decode(f.read_bytes(), fmt, w, h)
         img.save(f.with_suffix('.png'))
         rgb = img.convert('RGB'); a = img.getchannel('A')

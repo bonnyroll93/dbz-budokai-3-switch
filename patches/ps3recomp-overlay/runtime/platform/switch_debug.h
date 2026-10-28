@@ -12,6 +12,9 @@ typedef struct SwitchDebugSettings {
     int selected;
     int reboot_error;
     int recording;
+    int draw_start;
+    int draw_step;
+    int gpu_aa;
 } SwitchDebugSettings;
 
 void switch_debug_init(void);
@@ -23,5 +26,6 @@ void switch_debug_reboot_failed(int result);
 int switch_debug_take_screenshot(void);
 int switch_debug_recording(void);
 void switch_debug_stop_recording(void);
+int switch_debug_take_draw_capture(int *start, int *step);
 
 #endif

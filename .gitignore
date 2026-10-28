@@ -54,6 +54,8 @@
 !/shaders/deko3d/hlsl/*.hlsl
 !/shaders/deko3d/hlsl/override/
 !/shaders/deko3d/hlsl/override/*.hlsl
+!/shaders/deko3d/hlsl/builtin/
+!/shaders/deko3d/hlsl/builtin/*.hlsl
 /shaders/deko3d/hlsl/diagnostic/
 /shaders/deko3d/glsl/
 /shaders/deko3d/rsx_deko3d_shaders.h

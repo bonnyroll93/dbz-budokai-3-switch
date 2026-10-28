@@ -419,6 +419,7 @@ def input_signature(uam):
     if os.path.isdir(HLSL_DIR):
         sources += sorted(Path(HLSL_DIR).glob("*.hlsl"))
         sources += sorted((Path(HLSL_DIR) / "override").glob("*.hlsl"))
+        sources += sorted((Path(HLSL_DIR) / "builtin").glob("*.hlsl"))
     for path in sources:
         digest.update(str(path.resolve()).encode("utf-8"))
         digest.update(path.read_bytes())
@@ -450,6 +451,13 @@ def collect():
     for name, stage in (("kEngFixedVS", "vert"), ("kEngFixedPS", "frag")):
         text = c_string_literal(name, engine)
         shaders.append((stage, fnv1a64(text.encode("latin-1")), text, name))
+    builtin_dir = Path(HLSL_DIR) / "builtin"
+    for name, stage in (("fxaa_vs.hlsl", "vert"), ("fxaa_ps.hlsl", "frag")):
+        path = builtin_dir / name
+        if path.is_file():
+            raw = path.read_bytes()
+            origin = "kDkFxaaVS" if stage == "vert" else "kDkFxaaPS"
+            shaders.append((stage, fnv1a64(raw), raw.decode("latin-1"), origin))
     if os.path.isdir(HLSL_DIR):
         for fn in sorted(os.listdir(HLSL_DIR)):
             m = re.match(r"(vs|ps)_([0-9a-f]{16})\.hlsl$", fn)
@@ -557,6 +565,11 @@ def main():
                      (h, 0 if stage == "vert" else 1, tag, len(blob)))
     lines.append("};")
     lines.append("#define RSX_DK_SHADER_COUNT (sizeof rsx_dk_shader_table / sizeof rsx_dk_shader_table[0])")
+    for stage, h, _text, origin in shaders:
+        if origin == "kDkFxaaVS":
+            lines.append("#define RSX_DK_FXAA_VS_HASH 0x%016xull" % h)
+        elif origin == "kDkFxaaPS":
+            lines.append("#define RSX_DK_FXAA_PS_HASH 0x%016xull" % h)
     lines.append("")
     lines.append("#endif")
     if failed:
