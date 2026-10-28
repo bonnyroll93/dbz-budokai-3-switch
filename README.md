@@ -10,6 +10,71 @@ applies to this project's own code; dependencies retain their own licenses.
 This port is experimental. Switch rendering and combat performance are still
 being tested; no game assets or installable packages are distributed here.
 
+## Project status
+
+This is a static recompilation of the PS3 game, not an emulator. The PowerPC
+(PPU) and SPU code of your own copy of the game is lifted to C++ on your PC and
+compiled for the Switch together with a runtime that implements the PS3 system
+libraries. Graphics commands from the game (RSX) are replayed on the Switch GPU
+through deko3d.
+
+### What is implemented
+
+- **Import and lifting pipeline.** `import-game.ps1` installs the PKG through
+  RPCS3, checks the ELF hash and lifts PPU and SPU code locally.
+  `scripts/postprocess-lift.py` applies the port's own fixes to the lifted code
+  (guards for the Dragon Universe effect list, big-endian AltiVec lane fixes).
+- **Runtime.** A pinned ps3recomp revision with a local patch and an overlay
+  (`patches/`) provides memory, threads, file system, pad, audio and video
+  modules for the Switch.
+- **Graphics.** A draw engine decodes the RSX state and translates the game's
+  vertex and fragment programs to HLSL. The HLSL is compiled offline with `uam`
+  into deko3d shaders (`shaders/deko3d/hlsl/`). Missing shaders can be captured
+  on the console and added to the build. A vertex cache, texture cache, render
+  scale and an optional GPU FXAA pass are available.
+- **Timing.** Game logic runs on a 60 Hz scheduler (`Logic60`) with extra logic
+  passes between rendered frames. The pad is read on every logic step.
+- **Packaging.** Development NSP (game data on the SD card) and full NSP (game
+  data in RomFS). If deko3d fails to start, a limited software renderer is
+  used.
+- **Debug tools.** On-screen debug menu, screenshots, screen recording, a
+  per-draw frame capture, log collection and shader collection scripts (see
+  below).
+
+### Goals reached
+
+- The game boots and runs on the Switch; menus, duels and Dragon Universe (DU)
+  maps are playable.
+- Namek in DU now renders its full terrain. The cause was a family of lifted
+  AltiVec instructions (`vmulouh`, `vmuleuh`, `vsubsws`, `vaddshs`, `vmsumshm`)
+  that read vector registers with the wrong byte order.
+- The same fix brought the finishing-move cutscenes back in sync.
+- Missed and delayed controls were fixed by reading the pad live on every logic
+  step.
+- Reproducible setup, build and packaging with PowerShell scripts.
+
+### Known bugs
+
+- **Dragon Universe, UI.** Several menus flicker or are drawn twice, with the
+  second copy offset.
+- **Dragon Universe, skin.** The character's skin is rendered white, only on the
+  map. The same textures render correctly in the character select screen and in
+  duels, which use a different pixel shader variant; the map variant is the
+  suspect.
+- **Dragon Universe, flying.** At maximum flight speed, white pixel artifacts
+  sometimes appear on screen.
+- **Audio.** Reverb is disabled and some sounds are sometimes not played. Audio
+  needs to be improved.
+
+### Next goal: 60 FPS
+
+Performance work so far aimed at a stable 30 FPS in duels, the DU map and the
+screen shown after a DU fight. The next goal is an optimization pass to reach
+60 FPS. Earlier measurements pointed at the CPU cost of the DU map task, the
+post-fight experience and level screen, and the per-draw work of the draw
+engine. Use the light build (below) for performance measurements and change one
+thing per build.
+
 ## Requirements
 
 - Windows 10 or newer and Windows PowerShell 5.1.
@@ -131,6 +196,115 @@ Logs, settings, and save data remain on SD. The output is
 `build/dev/dbz3/Dragonball-Z-Budokai-3-full.nsp`. Copy and install it manually.
 Both package types request Deko3D by default and use the limited software
 renderer if Deko3D initialization fails.
+
+## Build configuration
+
+Build features are chosen in `scripts/build/switch-build-config.ps1`. Edit the
+values, then run `switch-dev.ps1` or `switch-full.ps1`; both reconfigure CMake
+on every run, so no manual cleanup is needed. The development and full NSP use
+the same configuration; `switch-full.ps1 -NoBuild` repackages the executable
+that `switch-dev.ps1` just built.
+
+| Flag | Meaning |
+|---|---|
+| `Lightweight` | Removes the high-frequency profilers and capture code. It also makes the `diag.on` marker (below) have no effect. |
+| `ProfilePpuFunctions` | Samples the innermost lifted PPU function and writes `t23-ppu-hot.log`. |
+| `ProfileSpuFunctions` | SPU function profiler. |
+| `LevelFunctionProfile` | Times `func_00030790` while the level-up screen task runs. |
+| `InputQueueProfile` | Logs input queue age, depth and dropped events every five seconds. |
+| `DekoDiagnostics` | Detailed deko3d texture and draw logs. |
+| `LoopMetrics` | Records game loop and task timing (`t26-loop-prof.log`). |
+| `FrameClockMetrics` | Records Switch frame-clock timing. |
+| `ShaderCapture` | Dumps shaders the build does not have to `t23-shaders/` on the SD card. |
+| `ScreenshotCapture` | Includes the debug-menu screenshot and screen-recording code. |
+| `Logic60` | Keeps the 60 Hz gameplay timing. Leave it on. |
+
+**Maximum-performance build** (use this to measure FPS): `Lightweight = $true`
+and every other flag `$false` except `Logic60`. This is the current default.
+
+**Debug build:** set `ScreenshotCapture = $true` to make the screenshot and
+recording rows of the debug menu work, `ShaderCapture = $true` to collect new
+shaders, and the profiler you need. `switch-dev.ps1` also accepts
+`-ProfilePpuFunctions`, `-LevelFunctionProfile`, `-InputQueueProfile` and
+`-Feature <name>`; the name is recorded in `build-info.txt`.
+
+Empty marker files in `sdmc:/switch/dbz-budokai-3-switch/` switch behaviour
+without a rebuild. Create them over MTP or with the SD card in a PC, and delete
+them to turn the option off:
+
+| File | Effect |
+|---|---|
+| `diag.on` | Verbose diagnostics and the GPU log (needs `Lightweight = $false`). |
+| `du-full-extra` | Runs the whole Dragon Universe task in the extra logic pass instead of only its update part. |
+| `repeat-draw-off` | Disables the repeated extra run of the DU draw task. |
+| `flush512` | Submits GPU work every 512 operations mid-frame (older behaviour). |
+| `texbatch-off` | One GPU wait per texture chunk (older behaviour). |
+| `present-sync` | Synchronous presents. |
+| `fps-off` | Hides the FPS counter until the debug settings are first saved. |
+
+To collect logs after a test, start **DBI > Run MTP responder** and run
+`scripts/pull-switch-logs.ps1 -Game dbz3`. Logs are copied to
+`build/logs/dbz3/dev/runNN`.
+
+## Debug menu
+
+The debug menu runs inside the game on the Switch. While it is open, the game
+receives no input.
+
+**Open and close.** Hold **L** and press both sticks (**L3 + R3**) together.
+Press the same combination again, **B**, or choose **CLOSE MENU** to close it.
+
+**Move.** **Up/Down** select a row. **Left/Right** change a value, **A** runs an
+action. Render scale, FPS, frame time and FXAA are saved to
+`sdmc:/switch/dbz-budokai-3-switch/debug-settings.cfg` and restored at the next
+start.
+
+| Row | What it does |
+|---|---|
+| RENDER SCALE | Internal resolution, 0.0 to 1.0 in steps of 0.1. A change takes effect after **REBOOT APPLICATION**; the menu shows `REBOOT NEEDED` until then. |
+| SHOW FPS | Toggles the FPS counter at the top right. |
+| SHOW FRAME MS | Toggles the frame time readout. |
+| SAVE SCREENSHOT (A) | Saves a JPEG to `captures/shot_*.jpg` and closes the menu. Needs `ScreenshotCapture`. |
+| START / STOP SCREEN RECORDING (A) | Records an MJPEG clip to `captures/clip_*.mjpg`. Needs `ScreenshotCapture`. |
+| DRAW START | First draw call a capture checkpoints from. Left/Right move by the draw step, **ZL/ZR** by 128. |
+| DRAW STEP | Toggles 8 or 1 draw calls between checkpoint images. |
+| CAPTURE NEXT DRAW FRAME (A) | Captures the next rendered frame draw by draw (see below) and closes the menu. |
+| REBOOT APPLICATION (A) | Restarts the game. |
+| CLOSE MENU (A) | Closes the menu. |
+| GPU FXAA | Toggles the GPU FXAA edge smoothing pass. |
+
+### Draw capture
+
+Use it to find which draw call produces a rendering bug.
+
+1. Get the game to the scene with the bug and open the menu.
+2. Set **DRAW START** (use 0 to see the whole frame) and **DRAW STEP** (1 for the
+   finest detail, up to 16 checkpoint images are saved).
+3. Choose **CAPTURE NEXT DRAW FRAME**. The next frame is written to
+   `sdmc:/switch/dbz-budokai-3-switch/draw-captures/frame_<n>_<time>/`.
+4. Copy the captures to the PC with the Switch in **DBI > Run MTP responder**:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\import-switch-images.ps1 -SkipAlbum
+```
+
+The script writes to `userdata/screenshoot/switch-dbi-import/`, with raw files
+under `raw/` and PNG conversions under `png/`. Add `-IncludeRecordings` to copy
+screen recordings too.
+
+A capture folder contains:
+
+- `draws.txt`: one line per draw call with the target surface, pipeline, blend
+  and depth state, vertex count, object-space bounding box, shader hashes,
+  fragment constants and the textures bound to each unit.
+- `drawNNNNN_t0.ppm` and `final.ppm`: checkpoint images and the final frame.
+- `u<unit>_<address>_<format>_<size>.bin`: raw texture data (`.png` decoded
+  where possible).
+- `fp_*.bin` and `vp_*.bin`: the raw fragment and vertex programs.
+
+Compare the same character or object in a good scene and a bad scene: if the
+texture hashes are equal and only the shader or its constants differ, the
+problem is in the shader path rather than in the texture data.
 
 ## Common errors and blockers
 
