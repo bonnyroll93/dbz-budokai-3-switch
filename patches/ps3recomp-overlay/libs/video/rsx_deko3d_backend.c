@@ -268,6 +268,7 @@ static struct {
     DkMemBlock mem_cmd_spare;      /* overflow chunk, added on demand        */
     DkMemBlock mem_staging;        /* CPU-cached transfer buffer             */
     u32 staging_used;              /* bytes of staging recorded, not yet idle */
+    int depth_clamp;               /* sdmc depth-clamp                       */
     int texbatch_off;              /* sdmc texbatch-off                      */
     u32 flush_ops;                 /* DK_FLUSH_OPS, or 512 with sdmc flush512 */
     DkCmdBuf   cmd;
@@ -986,15 +987,35 @@ static void be_readback(void* user, u32 surface, u32 x, u32 y, u32 w, u32 h,
 
 /* ---- present ------------------------------------------------------------- */
 
+/* DU effect-list guards (postprocess-lift.py): rejects per kind. Weak, so a
+ * build without the game port still links. */
+extern u32 g_dbz3_du_rejects[4] __attribute__((weak));
+
 static void dk_stats_window(void)
 {
     if (s_dk.st.presents % 30u) return;
     if (s_dk.st.presents % 300u == 0) ps3_switch_resource_report("periodic");
+    u32 ed[5];
+    rsx_draw_engine_drops(ed);
+    const u32* dr = g_dbz3_du_rejects;
+    /* Always on (diag.on is ignored by the lightweight build): the Namek
+     * terrain investigation needs these counts, one line per 300 presents. */
+    if (s_dk.st.presents % 300u == 0)
+        dk_err("[drops] presents=%u gpu_draws=%u skipped=%u guest_draws=%u "
+               "eng batch=%u fetch=%u topo=%u target=%u pipe=%u "
+               "du node=%u derived=%u next=%u lookup=%u depth_clamp=%d\n",
+               s_dk.st.presents, s_dk.st.gpu_draws, s_dk.st.draws_skipped,
+               rsx_draw_engine_guest_draws(),
+               ed[0], ed[1], ed[2], ed[3], ed[4],
+               dr ? dr[0] : 0u, dr ? dr[1] : 0u, dr ? dr[2] : 0u, dr ? dr[3] : 0u,
+               s_dk.depth_clamp);
     dk_log("presents=%u avg_present_us=%llu submits=%u avg_submit_us=%llu "
            "clears c=%u d=%u targets=%u depths=%u target_fail=%u "
            "pipelines=%u refused=%u readbacks=%u writes=%u acquire_fail=%u "
            "gpu_draws=%u skipped=%u tex=%u tex_fail=%u uploads=%u unbound=%u "
-           "blits=%u guest_draws_last_frame=%u\n",
+           "blits=%u guest_draws_last_frame=%u "
+           "eng_drops batch=%u fetch=%u topo=%u target=%u pipe=%u "
+           "du_rejects node=%u derived=%u next=%u lookup=%u\n",
            s_dk.st.presents,
            (unsigned long long)(s_dk.st.present_us / 30u),
            s_dk.st.submits,
@@ -1005,7 +1026,9 @@ static void dk_stats_window(void)
            s_dk.st.readbacks, s_dk.st.writes, s_dk.st.acquire_fail,
            s_dk.st.gpu_draws, s_dk.st.draws_skipped, s_dk.st.tex_made, s_dk.st.tex_fail,
            s_dk.st.tex_uploads, s_dk.st.tex_unbound, s_dk.st.blits,
-           rsx_draw_engine_guest_draws());
+           rsx_draw_engine_guest_draws(),
+           ed[0], ed[1], ed[2], ed[3], ed[4],
+           dr ? dr[0] : 0u, dr ? dr[1] : 0u, dr ? dr[2] : 0u, dr ? dr[3] : 0u);
     s_dk.st.present_us = 0;
     s_dk.st.submit_us = 0;
     s_dk.st.submits = 0;
@@ -1904,6 +1927,8 @@ static u32 be_pipeline_create(void* user, const char* vs_hlsl, const char* ps_hl
      * FRONT_FACE CCW 0x0901. deko3d's default clip space is D3D's (y up,
      * depth 0..1, upper-left window origin), so the winding needs no flip. */
     dkRasterizerStateDefaults(&P->ras);
+    /* sdmc depth-clamp: A/B test for Namek terrain lost to near/far clipping. */
+    P->ras.depthClampEnable = s_dk.depth_clamp ? 1 : 0;
     P->ras.cullMode = !rs->cull_enable ? DkFace_None
                     : rs->cull_face == 0x0404u ? DkFace_Front
                     : rs->cull_face == 0x0408u ? DkFace_FrontAndBack : DkFace_Back;
@@ -2380,6 +2405,9 @@ static int dk_init_device(u32 width, u32 height)
       s_dk.texbatch_off = f != NULL; if (f) fclose(f); }
     { FILE* f = fopen("sdmc:/switch/dbz-budokai-3-switch/flush512", "r");
       s_dk.flush_ops = f ? 512u : DK_FLUSH_OPS; if (f) fclose(f); }
+    { FILE* f = fopen("sdmc:/switch/dbz-budokai-3-switch/depth-clamp", "r");
+      s_dk.depth_clamp = f != NULL; if (f) fclose(f); }
+    dk_log("depth clamp %s\n", s_dk.depth_clamp ? "on" : "off");
     dk_log("texbatch %s, flush every %u ops\n", s_dk.texbatch_off ? "off" : "on", s_dk.flush_ops);
     dk_log("present: %s\n", s_dk.async_present && s_dk.set_ring[1]
                               ? "asynchronous (2 frame sets)" : "synchronous");

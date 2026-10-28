@@ -15,6 +15,10 @@ static const char *const status_log =
 static int sd_ready;
 static int graphics_ready;
 
+/* Effect-list guards in postprocess-lift.py count what they skip here: first
+ * node, derived address, next link, lookup. Logged by the deko3d stats line. */
+unsigned g_dbz3_du_rejects[4];
+
 void ps3_switch_app_prepare_display(void)
 {
     if (!graphics_ready) {
