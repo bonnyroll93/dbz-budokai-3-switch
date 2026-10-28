@@ -34,11 +34,50 @@ def make_include(source_path: pathlib.Path, addresses: tuple[str, ...], output: 
     output.write_text(content, encoding="latin-1", newline="\n")
 
 
+# ppu_lifter.py emits vmulouh/vmuleuh with host-endian uint16_t*/uint32_t*
+# access, but ctx->vr holds raw big-endian bytes (every other lane op goes
+# through ppu_vldu4/ppu_vstu4 or explicit byte assembly). The products were
+# built from byte-swapped halfwords and stored as little-endian words, so the
+# vector results were garbage; the DU effect slots carried pointers with low
+# bits 1..3 because of it. Rewrite them with big-endian lane access.
+_VMUL_RE = re.compile(
+    r"\{ uint32_t\* d=\(uint32_t\*\)&ctx->vr\[(\d+)\]; "
+    r"uint16_t\* a=\(uint16_t\*\)&ctx->vr\[(\d+)\]; "
+    r"uint16_t\* b=\(uint16_t\*\)&ctx->vr\[(\d+)\]; "
+    r"d\[0\]=\(uint32_t\)a\[([01])\]\*\(uint32_t\)b\[\4\]; "
+    r"d\[1\]=\(uint32_t\)a\[[23]\]\*\(uint32_t\)b\[[23]\]; "
+    r"d\[2\]=\(uint32_t\)a\[[45]\]\*\(uint32_t\)b\[[45]\]; "
+    r"d\[3\]=\(uint32_t\)a\[[67]\]\*\(uint32_t\)b\[[67]\]; \}")
+
+
+def _vmul_be(match: "re.Match[str]") -> str:
+    vd, va, vb, lane = match.group(1), match.group(2), match.group(3), int(match.group(4))
+    off = 2 * lane  # even halfword: bytes 4i..4i+1, odd: bytes 4i+2..4i+3
+    return (f"{{ const uint8_t* a=(const uint8_t*)&ctx->vr[{va}]; "
+            f"const uint8_t* b=(const uint8_t*)&ctx->vr[{vb}]; uint8_t r[16]; "
+            f"for(int i=0;i<4;i++){{ uint32_t x=(uint32_t)((a[4*i+{off}]<<8)|a[4*i+{off + 1}]); "
+            f"uint32_t y=(uint32_t)((b[4*i+{off}]<<8)|b[4*i+{off + 1}]); uint32_t p=x*y; "
+            f"r[4*i]=(uint8_t)(p>>24); r[4*i+1]=(uint8_t)(p>>16); r[4*i+2]=(uint8_t)(p>>8); r[4*i+3]=(uint8_t)p; }} "
+            f"memcpy(&ctx->vr[{vd}], r, 16); }}")
+
+
+def fix_vmul_halfwords(directory: pathlib.Path) -> int:
+    total = 0
+    for path in sorted(directory.glob("*.cpp")) + sorted(directory.glob("*.inc")):
+        data = path.read_text(encoding="latin-1")
+        fixed, n = _VMUL_RE.subn(_vmul_be, data)
+        if n:
+            path.write_text(fixed, encoding="latin-1", newline="\n")
+            total += n
+    return total
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("recompiled", type=pathlib.Path)
     parser.add_argument("includes", type=pathlib.Path)
     args = parser.parse_args()
+    print(f"[postprocess] big-endian vmulouh/vmuleuh sites fixed: {fix_vmul_halfwords(args.recompiled)}")
     chunk0 = args.recompiled / "ppu_recomp_000.cpp"
     chunk3 = args.recompiled / "ppu_recomp_003.cpp"
     chunk4 = args.recompiled / "ppu_recomp_004.cpp"
