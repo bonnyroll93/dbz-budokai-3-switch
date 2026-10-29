@@ -45,7 +45,7 @@ Lettura: duello e mappa DU stanno stabilmente intorno a 30 FPS, con una dispersi
 
 ## Esito Fase 0 (run57, build `base60-prof`, 29 ottobre 2026)
 
-Sessione di 236 s: DU mappa (circa 25 s), duello (circa 130 s), schermata livello (circa 40 s). Le scene sono separate con i task guest (`0x001DBC58` mappa DU, `0x001D1604` livello, resto duello/menu) e allineate ai log del clock per tempo cumulativo, con un errore possibile di una finestra da 5 s. La build ha i profiler attivi: i tempi assoluti sono un po' gonfiati, le proporzioni valgono. Script di analisi: `scripts/analyze-run.py` (da aggiungere).
+Sessione di 236 s: DU mappa (circa 25 s), duello (circa 130 s), schermata livello (circa 40 s). Le scene sono separate con i task guest (`0x001DBC58` mappa DU, `0x001D1604` livello, resto duello/menu) e allineate ai log del clock per tempo cumulativo, con un errore possibile di una finestra da 5 s. La build ha i profiler attivi: i tempi assoluti sono un po' gonfiati, le proporzioni valgono. Script di analisi: `scripts/analyze-run.py`.
 
 **1. Non è la GPU.** `t29-spikes.log` registra attese GPU solo in 12 picchi su 744 e `fence_ms` è sempre 0. Il collo di bottiglia è la CPU, su due thread in parallelo.
 
@@ -72,8 +72,8 @@ Il vsync a 60 Hz arrotonda a 2 VBlank (33,3 ms) qualunque frame tra 16,7 e 33,3 
 
 **Priorità che ne derivano**
 1. **Renderer (Fase 2)** guadagno più chiaro: 22 ms → meno di 14 ms nel duello. Sono il pipeline lookup, il vertex fetch e l'hash texture. Meno draw (scarto di draw fuori scissor o a zero pixel) aiuta soprattutto la schermata livello.
-2. **Guest (Fase 3)**: nel duello il costo è sparso su molti task, quindi servono guadagni generali (compilatore, qualità del codice lifted, clock) più che una singola funzione. La mappa DU è un caso a parte: un solo task da 16 ms.
-3. **Fase 1** (clock, `-O2`/`-O3`, affinità) è il primo passo perché potenzialmente dà un guadagno su tutto, e va misurato su `base60-light`.
+2. **Guest (Fase 3)**: nel duello il costo è sparso su molti task, quindi servono guadagni generali (compilatore, qualità del codice lifted, affinità dei thread) più che una singola funzione. La mappa DU è un caso a parte: un solo task da 16 ms.
+3. **Fase 1** (`-O2`/`-O3`, affinità dei thread) è il primo passo perché potenzialmente dà un guadagno su tutto senza costi di batteria, e va misurato su `base60-light`.
 4. **Pipeline parallela guest/renderer** (2.1) è già il design di oggi (due thread); il margine è quanto più si riesce a sovrapporli, ma con entrambi sopra 16,7 ms da soli non basta.
 
 ## Fase 1: guadagni a basso rischio (da validare con la baseline)
@@ -82,7 +82,7 @@ Non toccano la correttezza del codice lifted né la sequenza dei draw.
 
 | ID | Ipotesi | Verifica | Rischio |
 |---|---|---|---|
-| 1.1 | **Clock CPU/GPU**: nel codice non risultano chiamate a boost mode o impostazioni di clock (ricerca per `CpuBoost`, `clkrst`, `pcv`, `apm`: nessun risultato). Provare `appletSetCpuBoostMode` / profilo prestazioni e misurare. | FPS prima/dopo a parità di scena | Basso. Aumenta consumi/calore, da valutare in modalità portatile |
+| 1.1 | **Overclock/boost del clock: scartato.** Il gioco gira al clock normale (CPU 1020 MHz) e non si alza, per non pesare sulla batteria. Ogni guadagno deve venire da codice più efficiente. | | |
 | 1.2 | **Ottimizzazione compilatore**: il target usa `-O1` per le TU PPU enormi, solo alcune a `-O2`. Verificare `-O2`/`-O3` sulle TU più calde (dal profilo PPU), LTO/`-fno-plt`, `-mcpu=cortex-a57+crypto`, `-ffast-math` solo per le parti non vettoriali. | Tempo del task dominante, dimensione binario | Medio: tempi di build lunghi; verificare che la semantica float non cambi |
 | 1.3 | **Affinità e priorità dei thread**: assegnare esplicitamente thread guest, draw engine e frame clock a core diversi (la Switch dà 3 core ai giochi) ed evitare che audio/input/IO competano con quello principale. | Carico per core, frame time | Basso |
 | 1.4 | **Costo per draw**: lavori già fatti (cache attributi VP, indice pipeline, texture state). Rimisurare cosa resta in `pipeline`, texture e vertex upload con il profilo nuovo. | µs/draw per fase | Basso |
