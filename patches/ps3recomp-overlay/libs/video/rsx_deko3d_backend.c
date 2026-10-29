@@ -1132,7 +1132,7 @@ static void dk_draw_debug_menu(const SwitchDebugSettings* settings, u32 fps_x10,
 {
     const u32 px = s_dk.width >= 1920 ? 4u : 3u;
     const u32 x = 24u, y = 58u, line = 9u * px;
-    const u32 box_w = 220u * px, box_h = 190u * px;
+    const u32 box_w = 220u * px, box_h = 215u * px;
     DkScissor bg = { x, y, box_w, box_h };
     dkCmdBufSetScissors(s_dk.cmd, 0, &bg, 1);
     dkCmdBufClearColorFloat(s_dk.cmd, 0, DkColorMask_RGBA, 0.04f, 0.06f, 0.12f, 1.0f);
@@ -1140,36 +1140,47 @@ static void dk_draw_debug_menu(const SwitchDebugSettings* settings, u32 fps_x10,
     dk_debug_text(x + 3u * px, y + 3u * px, "DEBUG MENU", px, 0.2f, 1.0f, 0.4f);
     dk_debug_text(x + 3u * px, y + 3u * px + line, "UP DOWN SELECT  LEFT RIGHT CHANGE  A ENTER  B CLOSE", px,
                   0.7f, 0.8f, 1.0f);
-    const char* labels[11];
-    char scale[80], fps[80], ms[80], draw_start[80], draw_step[80], gpu_aa[80];
+    const char* labels[13];
+    char scale[80], fps[80], ms[80], draw_start[80], draw_step[80], gpu_aa[80], fps_stats[80];
     snprintf(scale, sizeof scale, "RENDER SCALE: %d.%d  ACTIVE: %d.%d%s",
              settings->scale_tenths / 10, settings->scale_tenths % 10,
              settings->active_scale_tenths / 10, settings->active_scale_tenths % 10,
              settings->scale_tenths != settings->active_scale_tenths ? "  REBOOT NEEDED" : "");
     snprintf(fps, sizeof fps, "SHOW FPS: %s", settings->show_fps ? "ON" : "OFF");
     snprintf(ms, sizeof ms, "SHOW FRAME MS: %s", settings->show_frame_ms ? "ON" : "OFF");
-    labels[0] = scale; labels[1] = fps; labels[2] = ms;
-    labels[3] = "SAVE SCREENSHOT";
-    labels[4] = settings->recording ? "STOP SCREEN RECORDING" : "START SCREEN RECORDING";
+    snprintf(gpu_aa, sizeof gpu_aa, "GPU FXAA: %s", settings->gpu_aa ? "ON" : "OFF");
+    snprintf(fps_stats, sizeof fps_stats, "SHOW FPS STATS: %s", settings->show_fps_stats ? "ON" : "OFF");
     snprintf(draw_start, sizeof draw_start, "DRAW START: %d  LEFT RIGHT STEP  ZL ZR 128", settings->draw_start);
     snprintf(draw_step, sizeof draw_step, "DRAW STEP: %d  CHANGE 8/1", settings->draw_step);
-    labels[5] = draw_start; labels[6] = draw_step;
-    labels[7] = "CAPTURE NEXT DRAW FRAME";
-    labels[8] = "REBOOT APPLICATION"; labels[9] = "CLOSE MENU";
-    snprintf(gpu_aa, sizeof gpu_aa, "GPU FXAA: %s", settings->gpu_aa ? "ON" : "OFF");
-    labels[10] = gpu_aa;
-    for (int i = 0; i < 11; i++) {
-        u32 yy = y + 3u * px + (u32)(i + 3) * line;
+    /* Row ids match switch_input.c; a header precedes the first row of a group. */
+    labels[0] = scale; labels[1] = gpu_aa;
+    labels[2] = fps; labels[3] = ms; labels[4] = fps_stats; labels[5] = "RESET FPS STATS";
+    labels[6] = "SAVE SCREENSHOT";
+    labels[7] = settings->recording ? "STOP SCREEN RECORDING" : "START SCREEN RECORDING";
+    labels[8] = draw_start; labels[9] = draw_step; labels[10] = "CAPTURE NEXT DRAW FRAME";
+    labels[11] = "REBOOT APPLICATION"; labels[12] = "CLOSE MENU";
+    static const char* const group_name[4] = { "DISPLAY", "PERFORMANCE", "CAPTURE", "SYSTEM" };
+    static const int group_first[4] = { 0, 2, 6, 11 };
+    u32 at = 3u;   /* menu line of the next row or header */
+    for (int i = 0; i < 13; i++) {
+        for (int gi = 0; gi < 4; gi++) {
+            if (group_first[gi] != i) continue;
+            snprintf(label, sizeof label, "- %s -", group_name[gi]);
+            dk_debug_text(x + 3u * px, y + 3u * px + at * line, label, px, 0.4f, 0.8f, 1.0f);
+            at++;
+        }
+        u32 yy = y + 3u * px + at * line;
         dk_debug_text(x + 3u * px, yy, i == settings->selected ? ">" : " ", px,
                       0.2f, 1.0f, 0.4f);
         dk_debug_text(x + 8u * px, yy, labels[i], px, 1.0f, 1.0f, 1.0f);
+        at++;
     }
     snprintf(label, sizeof label, "PRESENT FPS: %u.%u  FRAME: %u.%u MS",
              fps_x10 / 10u, fps_x10 % 10u, frame_ms_x10 / 10u, frame_ms_x10 % 10u);
-    dk_debug_text(x + 3u * px, y + 3u * px + 14u * line, label, px, 0.2f, 1.0f, 0.4f);
+    dk_debug_text(x + 3u * px, y + 3u * px + at * line, label, px, 0.2f, 1.0f, 0.4f);
     if (settings->reboot_error) {
         snprintf(label, sizeof label, "REBOOT FAILED: %08X", (unsigned)settings->reboot_error);
-        dk_debug_text(x + 3u * px, y + 3u * px + 15u * line, label, px, 1.0f, 0.3f, 0.3f);
+        dk_debug_text(x + 3u * px, y + 3u * px + (at + 1u) * line, label, px, 1.0f, 0.3f, 0.3f);
     }
 }
 
@@ -1267,7 +1278,18 @@ static void be_present(void* user, u32 surface)
     }
     { static u64 last_present, window_start;
       static u32 window_count, fps_x10, frame_ms_x10;
+      /* FPS stats: average over everything since the last reset, min/max over
+       * the one-second windows, so one slow frame does not set the minimum. */
+      static u64 stat_t0, stat_frames;
+      static u32 stat_min_x10 = 0xFFFFFFFFu, stat_max_x10, stat_windows;
       const u64 now = dk_now_us();
+      if (switch_debug_take_fps_reset()) {
+          stat_t0 = now; stat_frames = 0; stat_windows = 0;
+          stat_min_x10 = 0xFFFFFFFFu; stat_max_x10 = 0;
+          window_start = now; window_count = 0;
+      }
+      if (!stat_t0) stat_t0 = now;
+      stat_frames++;
       if (last_present) frame_ms_x10 = (u32)((now - last_present) / 100u);
       last_present = now;
       if (!window_start) window_start = now;
@@ -1275,6 +1297,9 @@ static void be_present(void* user, u32 surface)
       if (now - window_start >= 1000000u) {
           fps_x10 = (u32)((u64)window_count * 10000000u / (now - window_start));
           window_count = 0; window_start = now;
+          if (fps_x10 < stat_min_x10) stat_min_x10 = fps_x10;
+          if (fps_x10 > stat_max_x10) stat_max_x10 = fps_x10;
+          stat_windows++;
       }
       if (settings.show_fps) dk_draw_fps_overlay();
       if (settings.show_frame_ms) {
@@ -1285,6 +1310,20 @@ static void be_present(void* user, u32 surface)
           dkCmdBufSetScissors(s_dk.cmd, 0, &bg, 1);
           dkCmdBufClearColorFloat(s_dk.cmd, 0, DkColorMask_RGBA, 0.0f, 0.0f, 0.0f, 1.0f);
           dk_debug_text(bg.x + px, bg.y + px, ms, px, 0.2f, 1.0f, 0.2f);
+      }
+      if (settings.show_fps_stats) {
+          const u32 px = s_dk.width >= 1920 ? 4u : 3u;
+          const u32 avg_x10 = now > stat_t0 ? (u32)(stat_frames * 10000000u / (now - stat_t0)) : 0;
+          const u32 lo_x10 = stat_windows ? stat_min_x10 : 0;
+          char row[3][24];
+          snprintf(row[0], sizeof row[0], "AVG %u.%u", avg_x10 / 10u, avg_x10 % 10u);
+          snprintf(row[1], sizeof row[1], "MIN %u.%u", lo_x10 / 10u, lo_x10 % 10u);
+          snprintf(row[2], sizeof row[2], "MAX %u.%u", stat_max_x10 / 10u, stat_max_x10 % 10u);
+          DkScissor bg = { s_dk.width - 56u * px, 22u * px, 40u * px, 28u * px };
+          dkCmdBufSetScissors(s_dk.cmd, 0, &bg, 1);
+          dkCmdBufClearColorFloat(s_dk.cmd, 0, DkColorMask_RGBA, 0.0f, 0.0f, 0.0f, 1.0f);
+          for (u32 i = 0; i < 3; i++)
+              dk_debug_text(bg.x + px, bg.y + px + i * 9u * px, row[i], px, 0.2f, 1.0f, 0.2f);
       }
       if (settings.menu_open) dk_draw_debug_menu(&settings, fps_x10, frame_ms_x10);
     }

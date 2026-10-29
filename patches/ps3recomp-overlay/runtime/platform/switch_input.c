@@ -55,6 +55,8 @@ static atomic_int debug_draw_capture;
 static atomic_int debug_draw_start;
 static atomic_int debug_draw_step = 8;
 static atomic_int debug_gpu_aa;
+static atomic_int debug_fps_stats;
+static atomic_int debug_fps_reset;
 static int debug_active_scale;
 static u64 debug_old_buttons;
 static int debug_suppress_until_release;
@@ -63,7 +65,7 @@ void switch_debug_init(void)
 {
     int expected = 0;
     if (atomic_compare_exchange_strong(&debug_init_state, &expected, 1)) {
-        int scale = 10, fps = 1, frame_ms = 0, gpu_aa = 0;
+        int scale = 10, fps = 1, frame_ms = 0, gpu_aa = 0, fps_stats = 0;
         FILE *f = fopen(DEBUG_SETTINGS_PATH, "r");
         if (f) {
             char line[80];
@@ -74,6 +76,7 @@ void switch_debug_init(void)
                 else if (sscanf(line, "show_fps=%d", &value) == 1) fps = !!value;
                 else if (sscanf(line, "show_frame_ms=%d", &value) == 1) frame_ms = !!value;
                 else if (sscanf(line, "gpu_fxaa=%d", &value) == 1) gpu_aa = !!value;
+                else if (sscanf(line, "show_fps_stats=%d", &value) == 1) fps_stats = !!value;
             }
             fclose(f);
         } else {
@@ -86,6 +89,7 @@ void switch_debug_init(void)
         atomic_store(&debug_fps, fps);
         atomic_store(&debug_frame_ms, frame_ms);
         atomic_store(&debug_gpu_aa, gpu_aa);
+        atomic_store(&debug_fps_stats, fps_stats);
         atomic_store(&debug_init_state, 2);
     } else {
         while (atomic_load(&debug_init_state) != 2) svcSleepThread(1000000);
@@ -96,9 +100,9 @@ static void switch_debug_save(void)
 {
     FILE *f = fopen(DEBUG_SETTINGS_PATH ".tmp", "w");
     if (!f) return;
-    fprintf(f, "render_scale_tenths=%d\nshow_fps=%d\nshow_frame_ms=%d\ngpu_fxaa=%d\n",
+    fprintf(f, "render_scale_tenths=%d\nshow_fps=%d\nshow_frame_ms=%d\ngpu_fxaa=%d\nshow_fps_stats=%d\n",
             atomic_load(&debug_scale), atomic_load(&debug_fps), atomic_load(&debug_frame_ms),
-            atomic_load(&debug_gpu_aa));
+            atomic_load(&debug_gpu_aa), atomic_load(&debug_fps_stats));
     if (fclose(f) != 0) return;
     remove(DEBUG_SETTINGS_PATH);
     rename(DEBUG_SETTINGS_PATH ".tmp", DEBUG_SETTINGS_PATH);
@@ -113,7 +117,7 @@ SwitchDebugSettings switch_debug_snapshot(void)
         atomic_load(&debug_menu), atomic_load(&debug_selected),
         atomic_load(&debug_reboot_error), atomic_load(&debug_recording),
         atomic_load(&debug_draw_start), atomic_load(&debug_draw_step),
-        atomic_load(&debug_gpu_aa)
+        atomic_load(&debug_gpu_aa), atomic_load(&debug_fps_stats)
     };
     return s;
 }
@@ -132,8 +136,8 @@ int switch_debug_input(uint64_t buttons)
     }
     if (atomic_load(&debug_menu)) {
         int row = atomic_load(&debug_selected);
-        if (pressed & HidNpadButton_Up) row = (row + 10) % 11;
-        if (pressed & HidNpadButton_Down) row = (row + 1) % 11;
+        if (pressed & HidNpadButton_Up) row = (row + 12) % 13;
+        if (pressed & HidNpadButton_Down) row = (row + 1) % 13;
         atomic_store(&debug_selected, row);
         if (pressed & HidNpadButton_B) {
             atomic_store(&debug_menu, 0);
@@ -146,39 +150,44 @@ int switch_debug_input(uint64_t buttons)
                 if (scale >= 0 && scale <= 10) atomic_store(&debug_scale, scale);
                 switch_debug_save();
             } else if (row == 1) {
-                atomic_store(&debug_fps, !atomic_load(&debug_fps));
+                atomic_store(&debug_gpu_aa, !atomic_load(&debug_gpu_aa));
                 switch_debug_save();
             } else if (row == 2) {
+                atomic_store(&debug_fps, !atomic_load(&debug_fps));
+                switch_debug_save();
+            } else if (row == 3) {
                 atomic_store(&debug_frame_ms, !atomic_load(&debug_frame_ms));
                 switch_debug_save();
-            } else if (row == 3 && (pressed & HidNpadButton_A)) {
+            } else if (row == 4) {
+                atomic_store(&debug_fps_stats, !atomic_load(&debug_fps_stats));
+                switch_debug_save();
+            } else if (row == 5 && (pressed & HidNpadButton_A)) {
+                atomic_store(&debug_fps_reset, 1);
+            } else if (row == 6 && (pressed & HidNpadButton_A)) {
                 atomic_store(&debug_screenshot, 1);
                 atomic_store(&debug_menu, 0);
                 debug_suppress_until_release = 1;
-            } else if (row == 4 && (pressed & HidNpadButton_A)) {
+            } else if (row == 7 && (pressed & HidNpadButton_A)) {
                 atomic_store(&debug_recording, !atomic_load(&debug_recording));
                 atomic_store(&debug_menu, 0);
                 debug_suppress_until_release = 1;
-            } else if (row == 5) {
+            } else if (row == 8) {
                 if (pressed & HidNpadButton_ZL) delta = -1;
                 int amount = (pressed & (HidNpadButton_ZL | HidNpadButton_ZR))
                     ? 128 : atomic_load(&debug_draw_step);
                 int start = atomic_load(&debug_draw_start) + delta * amount;
                 if (start >= 0 && start <= 8192) atomic_store(&debug_draw_start, start);
-            } else if (row == 6) {
+            } else if (row == 9) {
                 atomic_store(&debug_draw_step, atomic_load(&debug_draw_step) == 8 ? 1 : 8);
-            } else if (row == 7 && (pressed & HidNpadButton_A)) {
+            } else if (row == 10 && (pressed & HidNpadButton_A)) {
                 atomic_store(&debug_draw_capture, 1);
                 atomic_store(&debug_menu, 0);
                 debug_suppress_until_release = 1;
-            } else if (row == 8 && (pressed & HidNpadButton_A)) {
+            } else if (row == 11 && (pressed & HidNpadButton_A)) {
                 atomic_store(&debug_reboot, 1);
-            } else if (row == 9 && (pressed & HidNpadButton_A)) {
+            } else if (row == 12 && (pressed & HidNpadButton_A)) {
                 atomic_store(&debug_menu, 0);
                 debug_suppress_until_release = 1;
-            } else if (row == 10) {
-                atomic_store(&debug_gpu_aa, !atomic_load(&debug_gpu_aa));
-                switch_debug_save();
             }
         }
         return 1;
@@ -193,6 +202,7 @@ int switch_debug_input(uint64_t buttons)
 int switch_debug_take_reboot(void) { return atomic_exchange(&debug_reboot, 0); }
 void switch_debug_reboot_failed(int result) { atomic_store(&debug_reboot_error, result); }
 int switch_debug_take_screenshot(void) { return atomic_exchange(&debug_screenshot, 0); }
+int switch_debug_take_fps_reset(void) { return atomic_exchange(&debug_fps_reset, 0); }
 int switch_debug_recording(void) { return atomic_load(&debug_recording); }
 void switch_debug_stop_recording(void) { atomic_store(&debug_recording, 0); }
 int switch_debug_take_draw_capture(int *start, int *step)

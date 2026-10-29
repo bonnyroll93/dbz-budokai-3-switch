@@ -15,6 +15,7 @@ typedef struct SwitchDebugSettings {
     int draw_start;
     int draw_step;
     int gpu_aa;
+    int show_fps_stats;
 } SwitchDebugSettings;
 
 void switch_debug_init(void);
@@ -24,6 +25,8 @@ int switch_debug_input(uint64_t buttons);
 int switch_debug_take_reboot(void);
 void switch_debug_reboot_failed(int result);
 int switch_debug_take_screenshot(void);
+/* Nonzero once after RESET FPS STATS was chosen in the menu. */
+int switch_debug_take_fps_reset(void);
 int switch_debug_recording(void);
 void switch_debug_stop_recording(void);
 int switch_debug_take_draw_capture(int *start, int *step);
