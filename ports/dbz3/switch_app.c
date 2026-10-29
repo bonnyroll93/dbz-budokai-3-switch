@@ -94,6 +94,9 @@ int ps3_switch_app_init(void)
     { extern int g_ppu_fast_vm;
       FILE* off = fopen("sdmc:/switch/dbz-budokai-3-switch/fastvm-off", "r");
       if (off) { g_ppu_fast_vm = 0; fclose(off); } }
+    { extern int g_rsx_tex_hash_per_use;   /* texhash-per-use: re-hash small textures on every use */
+      FILE* per_use = fopen("sdmc:/switch/dbz-budokai-3-switch/texhash-per-use", "r");
+      if (per_use) { g_rsx_tex_hash_per_use = 1; fclose(per_use); } }
     { extern int g_t23_postfx_nowait;   /* postfx-nowait: drop the end-of-frame wait (heap corruption risk) */
       FILE* sync = fopen("sdmc:/switch/dbz-budokai-3-switch/postfx-nowait", "r");
       if (sync) { g_t23_postfx_nowait = 1; fclose(sync); } }

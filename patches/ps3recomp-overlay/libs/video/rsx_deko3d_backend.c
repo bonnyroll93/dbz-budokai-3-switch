@@ -311,6 +311,8 @@ static struct {
     int        async_present;      /* 0: every present waits (present-sync) */
     DkMemBlock mem_desc;           /* image + sampler descriptors            */
     u32 code_used, ring_used;
+    u32 ring_epoch;                /* bumped every time ring_used is reset   */
+    u32 vs_off, vs_size, vs_epoch; /* ring copy of the bound vertex constants */
     dk_target textures[DK_MAX_TEXTURES];
     dk_view   views[DK_MAX_VIEWS];
     dk_target dummy;
@@ -323,6 +325,7 @@ static struct {
     struct {
         u32 pipe;
         const void* vs_data; u32 vs_bytes;
+        int vs_dirty;             /* bound since its last ring copy */
         const void* ps_data; u32 ps_bytes;
         u32 tex[16];
         rsx_be_sampler_desc samp[16];
@@ -551,6 +554,7 @@ static void dk_submit_wait_at(int line)
     dk_sets_idle();
     spk_wait_note(line, dk_now_us() - t0);
     s_dk.ring_used = 0;            /* the GPU is done with every draw's data */
+    s_dk.ring_epoch++;
     dk_cmd_reset();
     s_dk.st.submits++;
     s_dk.st.submit_us += dk_now_us() - t0;
@@ -584,6 +588,7 @@ static void dk_submit_async(void)
     s_dk.mem_cmd = s_dk.set_cmd[s_dk.set_cur];
     s_dk.mem_cmd_spare = s_dk.set_cmd_spare[s_dk.set_cur];
     s_dk.ring_used = 0;
+    s_dk.ring_epoch++;
     dk_cmd_reset();
     s_dk.st.submits++;
     s_dk.st.submit_us += dk_now_us() - t0;
@@ -2072,7 +2077,7 @@ static void be_pipeline_release(void* user, u32 pipeline)
  * vertices, after making room for everything at once. */
 static void be_bind_pipeline(void* user, u32 pipeline) { (void)user; s_dk.draw.pipe = pipeline; }
 static void be_bind_vs_constants(void* user, const void* data, u32 bytes)
-{ (void)user; s_dk.draw.vs_data = data; s_dk.draw.vs_bytes = data ? bytes : 0; }
+{ (void)user; s_dk.draw.vs_data = data; s_dk.draw.vs_bytes = data ? bytes : 0; s_dk.draw.vs_dirty = 1; }
 static void be_bind_ps_constants(void* user, const void* data, u32 bytes)
 { (void)user; s_dk.draw.ps_data = data; s_dk.draw.ps_bytes = data ? bytes : 0; }
 static void be_bind_textures(void* user, const u32* textures,
@@ -2162,10 +2167,15 @@ static void be_draw(void* user, rsx_topology topology, const void* vertices,
     const u32 need = vbytes + ibytes + vsb + psb + 4u * DK_UNIFORM_BUF_ALIGNMENT;
     if (need > DK_RING_SIZE) { dk_skip(32u, "draw larger than the data ring"); return; }
     if (DK_RING_SIZE - s_dk.ring_used < need) dk_submit_wait();
-    u32 voff, ioff = 0, vsoff, psoff;
+    /* The vertex constant block is 8 KiB and most draws bind the same one as
+     * the draw before (the engine rebinds only when it changed): reuse its ring
+     * copy until the ring is recycled. */
+    const int vs_reuse = !s_dk.draw.vs_dirty && s_dk.draw.vs_bytes &&
+                         s_dk.vs_epoch == s_dk.ring_epoch && s_dk.vs_size == vsb;
+    u32 voff, ioff = 0, vsoff = s_dk.vs_off, psoff;
     if (dk_ring_alloc(vbytes, 16u, &voff) ||
         (ibytes && dk_ring_alloc(ibytes, 16u, &ioff)) ||
-        dk_ring_alloc(vsb, DK_UNIFORM_BUF_ALIGNMENT, &vsoff) ||
+        (!vs_reuse && dk_ring_alloc(vsb, DK_UNIFORM_BUF_ALIGNMENT, &vsoff)) ||
         dk_ring_alloc(psb, DK_UNIFORM_BUF_ALIGNMENT, &psoff)) {
         dk_skip(32u, "data ring exhausted");
         return;
@@ -2174,8 +2184,14 @@ static void be_draw(void* user, rsx_topology topology, const void* vertices,
     const DkGpuAddr gpu = dkMemBlockGetGpuAddr(s_dk.mem_ring);
     memcpy(cpu + voff, vertices, vbytes);
     if (ibytes) memcpy(cpu + ioff, indices, ibytes);
-    if (s_dk.draw.vs_bytes) memcpy(cpu + vsoff, s_dk.draw.vs_data, s_dk.draw.vs_bytes);
-    else memset(cpu + vsoff, 0, 16);
+    if (!vs_reuse) {
+        if (s_dk.draw.vs_bytes) memcpy(cpu + vsoff, s_dk.draw.vs_data, s_dk.draw.vs_bytes);
+        else memset(cpu + vsoff, 0, 16);
+        s_dk.draw.vs_dirty = 0;
+        s_dk.vs_off = vsoff;
+        s_dk.vs_size = vsb;
+        s_dk.vs_epoch = s_dk.ring_epoch;
+    }
     if (s_dk.draw.ps_bytes) memcpy(cpu + psoff, s_dk.draw.ps_data, s_dk.draw.ps_bytes);
     else memset(cpu + psoff, 0, 16);
 

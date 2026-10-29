@@ -138,4 +138,6 @@ Con 60 presentazioni/s, la logica gira 1:1 con il rendering. Rivedere `Logic60`:
 
 | Build (`-Feature`) | Modifica | Scenario | Prima | Dopo | Esito |
 |---|---|---|---|---|---|
-| | | | | | |
+| `opt1-prof` (run58 contro run57) | Costanti fragment: copia dei soli slot usati invece del blocco da 32 KB; cache vertex program per contenuto; span texture solo su miss | Duello | renderer 47,6 µs/draw, 16,4 ms/render | 36,5 µs/draw, 11,9 ms/render | Tenuta. Fase pipeline 11,8 → 2,4 µs/draw |
+| | | Mappa DU | 67,7 µs/draw, 15,1 ms/render | 55,8 µs/draw, 12,5 ms/render | Tenuta |
+| | | Livello | 34,1 µs/draw, 32,8 ms/render | 24,3 µs/draw, 24,9 ms/render | Tenuta. FPS ancora limitati dal thread guest (passata 87–90 ms) |

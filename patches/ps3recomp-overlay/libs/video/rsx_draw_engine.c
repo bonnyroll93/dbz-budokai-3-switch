@@ -68,6 +68,10 @@ extern u32 ppu_vm_size;
 #define ENG_MAX_SURFACE_DIM 8192u
 
 #define ENG_VP_CB_BYTES    ((RSX_DSP_NUM_CONSTANTS + 2) * 16u)
+/* NV4097_SET_TRANSFORM_CONSTANT: the window every vertex constant write uses
+ * (rsx_dispatch.c M_VP_UPLOAD_CONST). Any write there invalidates vp_cb. */
+#define ENG_M_VP_UPLOAD_CONST 0x1F00u
+static u32 s_vp_const_serial;
 #define ENG_FP_MAX_BYTES   0x10000u
 
 #define M_ALPHA_TEST_ENABLE   0x0304
@@ -183,6 +187,8 @@ static struct {
     u8* tex_staging;
     u32 tex_staging_cap;
     u8* vp_cb;
+    u32 vp_cb_serial;      /* s_vp_const_serial when vp_cb was filled */
+    int vp_cb_valid;
     u8* fp_cb;
     u32 fp_cb_cap;
     u32* indices;
@@ -959,6 +965,12 @@ static u64 eng_texture_content_hash(u32 location, u32 offset, u32 span,
  * ENG_TEX_SMALL_BYTES are always hashed in full. */
 #define ENG_TEX_SMALL_BYTES      16384u
 #define ENG_TEX_FULL_HASH_FRAMES 16u
+/* Small textures used to be re-hashed in full on EVERY use, several times per
+ * frame for the shared UI and ramp atlases (4-8 us per draw in DBZ3). They are
+ * now checked once per presented frame like the large ones; writes the engine
+ * makes still force a check (eng_textures_touch). The port sets this to 1 to
+ * restore the per-use check (SD marker texhash-per-use). */
+int g_rsx_tex_hash_per_use = 0;
 static u64 eng_texture_sample_hash(u32 location, u32 offset, u32 span)
 {
     const u8* src = span ? eng_guest_ptr(NULL, location, offset, span) : NULL;
@@ -1167,8 +1179,6 @@ static u32 eng_texture_slot(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
                             u32 levels, u32 pitch, int cube, u32 remap)
 {
     if (!w || !h || w > ENG_MAX_TEX_DIM || h > ENG_MAX_TEX_DIM) return 0;
-    const u32 span = eng_texture_span(fmt, w, h, levels, pitch, cube);
-    if (!span) return 0;
 
 #ifdef __SWITCH__
     const u64 lookup_t0 = eng_tick();
@@ -1187,7 +1197,11 @@ static u32 eng_texture_slot(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
         s_tex_lookup_ticks += eng_tick() - lookup_t0;
         s_tex_lookup_hits++;
 #endif
-        if (e->handle && (e->last_hash_frame != g.frames || e->span <= ENG_TEX_SMALL_BYTES)) {
+        /* The span depends only on the key fields matched above, so a hit
+         * reuses the one stored at creation instead of rebuilding the mip chain. */
+        const u32 span = e->span;
+        if (e->handle && (e->last_hash_frame != g.frames || e->force_full ||
+                          (g_rsx_tex_hash_per_use && e->span <= ENG_TEX_SMALL_BYTES))) {
             e->last_hash_frame = g.frames;
             int full = span <= ENG_TEX_SMALL_BYTES || e->force_full ||
                        g.frames - e->last_full_frame >= ENG_TEX_FULL_HASH_FRAMES;
@@ -1224,6 +1238,9 @@ static u32 eng_texture_slot(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
 #ifdef __SWITCH__
     s_tex_lookup_ticks += eng_tick() - lookup_t0;
 #endif
+
+    const u32 span = eng_texture_span(fmt, w, h, levels, pitch, cube);
+    if (!span) return 0;
 
     /* A miss: make room first (release before upload), then upload, evicting
      * more least-recently-used entries while the backend refuses. */
@@ -1464,7 +1481,7 @@ static int eng_surface_texture_layout(const eng_surface* s,
  * rescanned, re-parsed for constants and structurally hashed, on every draw.
  * Vertex programs are keyed on (start, vp_gen); fragment programs on their
  * address and verified by comparing the cached bytes with guest memory. */
-typedef struct { u32 start, gen, instrs, input_mask, valid; u64 hash; } eng_vp_memo;
+typedef struct { u32 start, gen, instrs, input_mask, valid; u64 hash; u8* bytes; } eng_vp_memo;
 typedef struct {
     u32 loc, off, size, valid;
     u8* bytes;
@@ -1472,20 +1489,29 @@ typedef struct {
     int consts_rc;
     rsx_fp_constant_block consts;
 } eng_fp_memo;
-#define ENG_VP_MEMO 16u
+#define ENG_VP_MEMO 32u
 #define ENG_FP_MEMO 32u
 static eng_vp_memo s_vp_memo[ENG_VP_MEMO];
 static eng_fp_memo s_fp_memo[ENG_FP_MEMO];
 static u32 s_vp_memo_next, s_fp_memo_next;
 
+/* DBZ3 reloads a handful of vertex programs into the same slot about once per
+ * draw, so vp_gen changes on nearly every draw while the programs repeat. A
+ * generation miss is therefore checked against each memo's bytes: the same
+ * bytes from start through the END instruction are the same program. */
 static eng_vp_memo* eng_vp_lookup(u32 start)
 {
-    for (u32 i = 0; i < ENG_VP_MEMO; i++)
-        if (s_vp_memo[i].valid && s_vp_memo[i].start == start &&
-            s_vp_memo[i].gen == g.rsx.vp_gen)
-            return &s_vp_memo[i];
-    eng_vp_memo* m = &s_vp_memo[s_vp_memo_next++ % ENG_VP_MEMO];
     const u8* uc = (const u8*)(g.rsx.vp + start * 4);
+    for (u32 i = 0; i < ENG_VP_MEMO; i++) {
+        eng_vp_memo* m = &s_vp_memo[i];
+        if (!m->valid || m->start != start) continue;
+        if (m->gen == g.rsx.vp_gen) return m;
+        if (m->instrs && m->bytes && memcmp(uc, m->bytes, m->instrs * 16u) == 0) {
+            m->gen = g.rsx.vp_gen;
+            return m;
+        }
+    }
+    eng_vp_memo* m = &s_vp_memo[s_vp_memo_next++ % ENG_VP_MEMO];
     m->start = start;
     m->gen = g.rsx.vp_gen;
     m->instrs = rsx_vp_program_size_instrs(uc, (RSX_DSP_VP_INSTR - start) * 16u);
@@ -1494,6 +1520,10 @@ static eng_vp_memo* eng_vp_lookup(u32 start)
     m->input_mask = (m->instrs &&
                      rsx_vp_analyze_inputs(uc, m->instrs * 16u, &analysis) == (int)m->instrs &&
                      analysis.exact && analysis.input_mask) ? analysis.input_mask : 0xFFFFu;
+    /* Without a copy the memo still serves exact generation hits. */
+    u8* nb = m->instrs ? (u8*)realloc(m->bytes, m->instrs * 16u) : NULL;
+    if (nb) { memcpy(nb, uc, m->instrs * 16u); m->bytes = nb; }
+    else { free(m->bytes); m->bytes = NULL; }
     m->valid = 1;
     return m;
 }
@@ -1685,9 +1715,16 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
     u32 unnorm_dim[RSX_DSP_NUM_TEXTURES][2];
     const u32 unnorm_mask = eng_texture_shape_masks(unnorm_dim, &cube_mask);
 
+    /* Only the slots the program uses: the block holds 2048 of them (32 KiB),
+     * and copying all of it on every draw cost more than the rest of the
+     * pipeline lookup and flushed the L1 cache. Nothing reads past count. */
     if (!fixed && s_cur_fp) {
         if (s_cur_fp->consts_rc < 0) return 0;
-        g.fp_constants = s_cur_fp->consts;
+        g.fp_constants.count = s_cur_fp->consts.count;
+        memcpy(g.fp_constants.values, s_cur_fp->consts.values,
+               (size_t)s_cur_fp->consts.count * sizeof g.fp_constants.values[0]);
+    } else if (fixed) {
+        g.fp_constants.count = 0;
     } else {
         memset(&g.fp_constants, 0, sizeof g.fp_constants);
         if (!fixed && rsx_fp_collect_constants(fp_uc, fp_size, &g.fp_constants) < 0)
@@ -3323,8 +3360,6 @@ static void sink_end(void* user, const rsx_dispatch* r)
         xf[5] = -((vp.translate[1] - H * 0.5f) / (H * 0.5f));
         xf[6] = vp.translate[2];
     }
-    memcpy(g.vp_cb, g.rsx.constants, RSX_DSP_NUM_CONSTANTS * 16u);
-    memcpy(g.vp_cb + RSX_DSP_NUM_CONSTANTS * 16u, xf, sizeof xf);
 
     /* The buffered fragment constants, then fp_alpha: the layout
      * rsx_fp_decompile_buffered_ex compiled the shader against. */
@@ -3361,7 +3396,17 @@ static void sink_end(void* user, const rsx_dispatch* r)
     for (u32 i = 0; i < n_targets; i++) handles[i] = g.surfaces[targets[i]].handle;
     g.be->bind_targets(g.be->user, handles, n_targets, depth_handle);
     g.be->bind_pipeline(g.be->user, pipeline);
-    g.be->bind_vs_constants(g.be->user, g.vp_cb, ENG_VP_CB_BYTES);
+    /* Rebuild and rebind the 8 KiB vertex constant block only when a constant
+     * upload or the viewport epilogue changed it since the last draw; the
+     * backend then reuses its copy instead of writing it again. */
+    if (!g.vp_cb_valid || g.vp_cb_serial != s_vp_const_serial ||
+        memcmp(g.vp_cb + RSX_DSP_NUM_CONSTANTS * 16u, xf, sizeof xf) != 0) {
+        memcpy(g.vp_cb, g.rsx.constants, RSX_DSP_NUM_CONSTANTS * 16u);
+        memcpy(g.vp_cb + RSX_DSP_NUM_CONSTANTS * 16u, xf, sizeof xf);
+        g.vp_cb_serial = s_vp_const_serial;
+        g.vp_cb_valid = 1;
+        g.be->bind_vs_constants(g.be->user, g.vp_cb, ENG_VP_CB_BYTES);
+    }
     g.be->bind_ps_constants(g.be->user, g.fp_cb, fp_bytes);
     g.be->bind_textures(g.be->user, textures, samplers, tex_mask);
     g.be->bind_vertex_textures(g.be->user, vtextures, vsamplers, vtex_mask);
@@ -3626,12 +3671,14 @@ void rsx_draw_engine_method(u32 method, u32 arg)
      * (0xE9xx, 0xEBxx) encode the subchannel bits as part of the address;
      * preserve them with the wider mask. */
     u32 m = (method >= 0xE000u) ? (method & 0xFFFCu) : (method & 0x1FFCu);
+    if (m >= ENG_M_VP_UPLOAD_CONST && m < ENG_M_VP_UPLOAD_CONST + 32u * 4u) s_vp_const_serial++;
     rsx_dispatch_method(&g.rsx, m, arg);
 }
 
 int rsx_draw_engine_constant_burst(u32 first_method, const u8* be_words, u32 count)
 {
     if (!g.ready) return 0;
+    s_vp_const_serial++;
     rsx_dispatch_constant_burst(&g.rsx, first_method & 0x1FFCu, be_words, count);
     return 1;
 }
