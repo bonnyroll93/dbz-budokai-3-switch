@@ -78,11 +78,18 @@ option(PORT_SWITCH_PPU_VECNEON "Rewrite lifted AltiVec blocks as NEON (Switch)" 
 #   T40 PORT_SWITCH_PPU_LIFTFAST  fewer trampoline drains + cheaper guest memory
 #       accessors (scripts/ppu_liftfast.py, dbz3_liftfast.h)
 option(PORT_SWITCH_PPU_LIFTFAST "Lifted PPU: drop dead trampoline drains, lean memory accessors (Switch)" ON)
+#   T41 PORT_SWITCH_PPU_REGCACHE  registers in locals for functions with a loop
+#       (scripts/ppu_regcache.py, the PPU form of spu_regcache.py). OFF: run60/61
+#       showed jumping characters and a crash on a bad vertex address, and the
+#       duel gained only ~3%.
+option(PORT_SWITCH_PPU_REGCACHE "Lifted PPU: keep registers in locals in functions with a loop (Switch)" OFF)
+option(PORT_SWITCH_PPU_REGCACHE_ALL "Lifted PPU regcache: also rewrite functions without a loop (Switch)" ON)
 set(PPU_TU000 "${RECOMP_DIR}/ppu_recomp_000.cpp")
 set(PPU_TU004 "${RECOMP_DIR}/ppu_recomp_004.cpp")
 set(PPU_TU003 "${RECOMP_DIR}/ppu_recomp_003.cpp")
 if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" AND
-   (PORT_SWITCH_PPU_FUNC_PROFILE OR PORT_SWITCH_PPU_VECNEON OR PORT_SWITCH_PPU_LIFTFAST))
+   (PORT_SWITCH_PPU_FUNC_PROFILE OR PORT_SWITCH_PPU_VECNEON OR PORT_SWITCH_PPU_LIFTFAST OR
+    PORT_SWITCH_PPU_REGCACHE))
     set(_ppu_py "${CMAKE_CURRENT_SOURCE_DIR}/../../.venv/Scripts/python.exe")
     set(_ppu_scripts "${CMAKE_CURRENT_SOURCE_DIR}/../../scripts")
     set(_ppu_out "${CMAKE_CURRENT_BINARY_DIR}/ppu-rewrite")
@@ -127,6 +134,18 @@ if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" AND
                         "${CMAKE_CURRENT_SOURCE_DIR}/dbz3_liftfast.h" VERBATIM)
             set(cur "${out}")
         endif()
+        if(PORT_SWITCH_PPU_REGCACHE)
+            set(_rc_args "")
+            if(PORT_SWITCH_PPU_REGCACHE_ALL)
+                set(_rc_args "--all")
+            endif()
+            set(out "${_ppu_out}/${src_base}.rc.cpp")
+            add_custom_command(OUTPUT "${out}"
+                COMMAND ${CMAKE_COMMAND} -E make_directory "${_ppu_out}"
+                COMMAND "${_ppu_py}" -I "${_ppu_scripts}/ppu_regcache.py" "${cur}" "${out}" ${_rc_args}
+                DEPENDS "${cur}" "${_ppu_scripts}/ppu_regcache.py" VERBATIM)
+            set(cur "${out}")
+        endif()
         list(APPEND _ppu_new_sources "${cur}")
         if(src_name STREQUAL "ppu_recomp_000.cpp")
             set(PPU_TU000 "${cur}")
@@ -139,7 +158,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" AND
         endif()
     endforeach()
     set(RECOMP_SOURCES ${_ppu_new_sources})
-    message(STATUS "Lifted PPU:      rewritten copies (neon=${PORT_SWITCH_PPU_VECNEON} profile=${PORT_SWITCH_PPU_FUNC_PROFILE} liftfast=${PORT_SWITCH_PPU_LIFTFAST})")
+    message(STATUS "Lifted PPU:      rewritten copies (neon=${PORT_SWITCH_PPU_VECNEON} profile=${PORT_SWITCH_PPU_FUNC_PROFILE} liftfast=${PORT_SWITCH_PPU_LIFTFAST} regcache=${PORT_SWITCH_PPU_REGCACHE} all=${PORT_SWITCH_PPU_REGCACHE_ALL})")
 endif()
 message(STATUS "Lifted sources:  ${RECOMP_SOURCE_COUNT} file(s)")
 

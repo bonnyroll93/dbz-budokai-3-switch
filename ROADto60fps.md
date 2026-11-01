@@ -141,3 +141,5 @@ Con 60 presentazioni/s, la logica gira 1:1 con il rendering. Rivedere `Logic60`:
 | `opt1-prof` (run58 contro run57) | Costanti fragment: copia dei soli slot usati invece del blocco da 32 KB; cache vertex program per contenuto; span texture solo su miss | Duello | renderer 47,6 µs/draw, 16,4 ms/render | 36,5 µs/draw, 11,9 ms/render | Tenuta. Fase pipeline 11,8 → 2,4 µs/draw |
 | | | Mappa DU | 67,7 µs/draw, 15,1 ms/render | 55,8 µs/draw, 12,5 ms/render | Tenuta |
 | | | Livello | 34,1 µs/draw, 32,8 ms/render | 24,3 µs/draw, 24,9 ms/render | Tenuta. FPS ancora limitati dal thread guest (passata 87–90 ms) |
+| `opt5-prof` (run60–62 contro run58) | T41 `ppu_regcache.py`: registri PPU in variabili locali nel codice lifted | Duello | guest 25,8 ms/passata | 25,1 ms/passata | Scartata (spenta di default). Guadagno ~3%; personaggi che scattano (run60) e crash del renderer su un indirizzo vertex non valido emesso dal guest (run61) |
+| `opt5-norc-prof` (run63) | Stessa build senza regcache | Duello | | guest ~25–26 ms, renderer ~16 ms per frame | Nessun crash né scatto: regcache era la causa |
