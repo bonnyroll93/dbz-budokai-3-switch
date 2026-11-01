@@ -29,3 +29,25 @@ void func_0002C088(ppu_context* ctx) __attribute__((weak));   /* defined in TU 0
 void func_0002C088_lifted(ppu_context* ctx)
     __attribute__((alias("_Z13func_0002C088P11ppu_context")));
 #endif
+/* Native-A step 2a-i: shader program binds (dbz3_native_shader.cpp). */
+#ifdef DBZ3_NATIVE_SHADER
+void func_00053B30(ppu_context* ctx) __attribute__((weak));   /* defined in TU 000 */
+void func_00053880(ppu_context* ctx) __attribute__((weak));   /* defined in TU 000 */
+void func_00053B30_lifted(ppu_context* ctx)
+    __attribute__((alias("_Z13func_00053B30P11ppu_context")));
+void func_00053880_lifted(ppu_context* ctx)
+    __attribute__((alias("_Z13func_00053880P11ppu_context")));
+#endif
+/* Native-A steps 2a-ii and 2b: draw-state functions (dbz3_native_draw.cpp). */
+#ifdef DBZ3_NATIVE_DRAW
+void func_0002BAE8(ppu_context* ctx) __attribute__((weak));   /* defined in TU 000 */
+void func_00053A7C(ppu_context* ctx) __attribute__((weak));   /* defined in TU 000 */
+void func_0004E288(ppu_context* ctx) __attribute__((weak));   /* defined in TU 000 */
+void func_0004EB98(ppu_context* ctx) __attribute__((weak));   /* defined in TU 000 */
+void func_00050844(ppu_context* ctx) __attribute__((weak));   /* defined in TU 000 */
+void func_0002BAE8_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_0002BAE8P11ppu_context")));
+void func_00053A7C_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_00053A7CP11ppu_context")));
+void func_0004E288_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_0004E288P11ppu_context")));
+void func_0004EB98_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_0004EB98P11ppu_context")));
+void func_00050844_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_00050844P11ppu_context")));
+#endif

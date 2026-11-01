@@ -436,6 +436,32 @@ if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
                 set(_dbz3_native_material ON)
                 message(STATUS "DBZ3 native material apply: ON")
             endif()
+            # Native-A step 2a-i: vertex and fragment program binds.
+            option(PORT_DBZ3_NATIVE_SHADER "Native shader program binds (guest 0x00053B30, 0x00053880)" ON)
+            if(PORT_DBZ3_NATIVE_SHADER AND PORT_DBZ3_NATIVE_MATERIAL)
+                target_sources(${PROJECT_NAME} PRIVATE dbz3_native_shader.cpp)
+                set_property(SOURCE dbz3_native_shader.cpp APPEND PROPERTY
+                    COMPILE_OPTIONS "-ffp-contract=off;-w")
+                set_property(SOURCE dbz3_native_shader.cpp APPEND PROPERTY
+                    INCLUDE_DIRECTORIES "${CMAKE_CURRENT_BINARY_DIR}/native-inc")
+                set_property(SOURCE dbz3_native_shader.cpp APPEND PROPERTY
+                    OBJECT_DEPENDS "${_prelude}")
+                set(_dbz3_native_shader ON)
+                message(STATUS "DBZ3 native shader binds: ON")
+            endif()
+            # Native-A steps 2a-ii and 2b: draw-state functions under the mesh path.
+            option(PORT_DBZ3_NATIVE_DRAW "Native draw-state functions (guest 0x0002BAE8 and others)" ON)
+            if(PORT_DBZ3_NATIVE_DRAW AND PORT_DBZ3_NATIVE_MATERIAL)
+                target_sources(${PROJECT_NAME} PRIVATE dbz3_native_draw.cpp)
+                set_property(SOURCE dbz3_native_draw.cpp APPEND PROPERTY
+                    COMPILE_OPTIONS "-ffp-contract=off;-w")
+                set_property(SOURCE dbz3_native_draw.cpp APPEND PROPERTY
+                    INCLUDE_DIRECTORIES "${CMAKE_CURRENT_BINARY_DIR}/native-inc")
+                set_property(SOURCE dbz3_native_draw.cpp APPEND PROPERTY
+                    OBJECT_DEPENDS "${_prelude}")
+                set(_dbz3_native_draw ON)
+                message(STATUS "DBZ3 native draw-state functions: ON")
+            endif()
         endif()
         target_link_options(${PROJECT_NAME} PRIVATE "LINKER:--wrap=_Z13func_001FCAC4P11ppu_context")
         message(STATUS "DBZ3 gcm-const fast path: ON")
@@ -647,6 +673,12 @@ if(_dbz3_weak_overrides)
         COMPILE_OPTIONS "-include;${CMAKE_CURRENT_SOURCE_DIR}/dbz3_weak_overrides.h")
     if(_dbz3_native_material)
         set_property(SOURCE "${PPU_TU000}" APPEND PROPERTY COMPILE_DEFINITIONS DBZ3_NATIVE_MATERIAL=1)
+    endif()
+    if(_dbz3_native_shader)
+        set_property(SOURCE "${PPU_TU000}" APPEND PROPERTY COMPILE_DEFINITIONS DBZ3_NATIVE_SHADER=1)
+    endif()
+    if(_dbz3_native_draw)
+        set_property(SOURCE "${PPU_TU000}" APPEND PROPERTY COMPILE_DEFINITIONS DBZ3_NATIVE_DRAW=1)
     endif()
 endif()
 
