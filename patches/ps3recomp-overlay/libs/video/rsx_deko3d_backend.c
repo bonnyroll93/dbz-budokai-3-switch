@@ -423,6 +423,121 @@ static void dk_alloc_give(dk_alloc* a, u32 off, u32 size)
 
 /* ---- command submission -------------------------------------------------- */
 
+/* meas1 (diag.on only): GPU time per frame. Every command list gets a GPU
+ * timestamp when it starts and when it ends; the CPU zeroes the two report
+ * slots first and reads them back once both are written, which the GPU does
+ * in submission order. A frame's busy time is the sum of its lists' spans
+ * (idle gaps between lists are not counted); its span runs from the first
+ * list's start to the last list's end. Timestamps are raw GPU ticks: each
+ * 5 s line also gives ticks per CPU millisecond to convert them. Written to
+ * t31-gpu-time.log. */
+#define GT_SLOTS 2048u
+static DkMemBlock dk_block(u32 size, u32 flags);
+static struct {
+    DkMemBlock mem;
+    volatile u64* rep;            /* slot s: start at [4s+1], end at [4s+3] */
+    FILE* f;
+    u32 next, cur, open, frame;
+    struct { u32 slot, frame; } q[GT_SLOTS];
+    u32 qh, qt;
+    u32 fr_frame, fr_lists; u64 fr_busy, fr_first, fr_last;
+    u64 win_us, frames, lists, busy, span, max_busy, max_span;
+    u64 cal_ts, cal_us;
+} s_gt;
+
+static void gt_list_begin(void)
+{
+    if (!s_gt.rep || s_gt.qt - s_gt.qh >= GT_SLOTS - 1u) return;
+    const u32 s = s_gt.next++ % GT_SLOTS;
+    s_gt.rep[4u * s + 1u] = 0;
+    s_gt.rep[4u * s + 3u] = 0;
+    dkCmdBufReportCounter(s_dk.cmd, DkCounter_Timestamp,
+                          dkMemBlockGetGpuAddr(s_gt.mem) + 32u * s);
+    s_gt.cur = s;
+    s_gt.open = 1;
+}
+
+/* Before dkCmdBufFinishList. */
+static void gt_list_end(void)
+{
+    if (!s_gt.open) return;
+    dkCmdBufReportCounter(s_dk.cmd, DkCounter_Timestamp,
+                          dkMemBlockGetGpuAddr(s_gt.mem) + 32u * s_gt.cur + 16u);
+    s_gt.q[s_gt.qt % GT_SLOTS].slot = s_gt.cur;
+    s_gt.q[s_gt.qt % GT_SLOTS].frame = s_gt.frame;
+    s_gt.qt++;
+    s_gt.open = 0;
+}
+
+static void gt_frame_close(void)
+{
+    if (!s_gt.fr_lists) return;
+    const u64 span = s_gt.fr_last - s_gt.fr_first;
+    s_gt.frames++;
+    s_gt.lists += s_gt.fr_lists;
+    s_gt.busy += s_gt.fr_busy;
+    s_gt.span += span;
+    if (s_gt.fr_busy > s_gt.max_busy) s_gt.max_busy = s_gt.fr_busy;
+    if (span > s_gt.max_span) s_gt.max_span = span;
+    s_gt.fr_lists = 0;
+    s_gt.fr_busy = 0;
+}
+
+/* After each present's submit: collect finished lists, log every 5 s. */
+static u64 dk_now_us(void);
+static void gt_present(void)
+{
+    if (!s_gt.rep) return;
+    while (s_gt.qh != s_gt.qt) {
+        const u32 s = s_gt.q[s_gt.qh % GT_SLOTS].slot;
+        const u64 t0 = s_gt.rep[4u * s + 1u], t1 = s_gt.rep[4u * s + 3u];
+        if (!t0 || !t1) break;                       /* not run yet */
+        const u32 fr = s_gt.q[s_gt.qh % GT_SLOTS].frame;
+        if (s_gt.fr_lists && fr != s_gt.fr_frame) gt_frame_close();
+        if (!s_gt.fr_lists) { s_gt.fr_frame = fr; s_gt.fr_first = t0; }
+        s_gt.fr_lists++;
+        s_gt.fr_busy += t1 > t0 ? t1 - t0 : 0;
+        s_gt.fr_last = t1;
+        s_gt.qh++;
+    }
+    s_gt.frame++;
+    const u64 now = dk_now_us();
+    if (!s_gt.win_us) {
+        s_gt.win_us = now;
+        s_gt.cal_us = now;
+        s_gt.cal_ts = s_gt.fr_last;
+        return;
+    }
+    if (now - s_gt.win_us < 5000000u || !s_gt.frames) return;
+    const u64 cal_ms = (now - s_gt.cal_us) / 1000u;
+    const u64 tpm = cal_ms && s_gt.fr_last > s_gt.cal_ts
+                  ? (s_gt.fr_last - s_gt.cal_ts) / cal_ms : 0;
+    fprintf(s_gt.f, "window_ms=%llu frames=%llu lists=%llu busy_ticks/f=%llu max_busy_ticks=%llu "
+                    "span_ticks/f=%llu max_span_ticks=%llu ticks_per_ms=%llu\n",
+            (unsigned long long)((now - s_gt.win_us) / 1000u),
+            (unsigned long long)s_gt.frames, (unsigned long long)s_gt.lists,
+            (unsigned long long)(s_gt.busy / s_gt.frames), (unsigned long long)s_gt.max_busy,
+            (unsigned long long)(s_gt.span / s_gt.frames), (unsigned long long)s_gt.max_span,
+            (unsigned long long)tpm);
+    fflush(s_gt.f);
+    s_gt.win_us = now;
+    s_gt.cal_us = now;
+    s_gt.cal_ts = s_gt.fr_last;
+    s_gt.frames = s_gt.lists = s_gt.busy = s_gt.span = 0;
+    s_gt.max_busy = s_gt.max_span = 0;
+}
+
+static void gt_init(void)
+{
+    if (!ps3_diag_enabled) return;
+    s_gt.mem = dk_block(GT_SLOTS * 32u, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuUncached);
+    if (!s_gt.mem) return;
+    s_gt.f = fopen("sdmc:/switch/dbz-budokai-3-switch/t31-gpu-time.log", "w");
+    if (!s_gt.f) return;
+    fprintf(s_gt.f, "GPU time per presented frame from command list timestamps, raw ticks\n");
+    s_gt.rep = (volatile u64*)dkMemBlockGetCpuAddr(s_gt.mem);
+}
+
 static void dk_cmd_reset(void)
 {
     dkCmdBufClear(s_dk.cmd);
@@ -441,6 +556,7 @@ static void dk_cmd_reset(void)
                         DkInvalidateFlags_Descriptors | DkInvalidateFlags_Shader |
                         DkInvalidateFlags_Image | DkInvalidateFlags_L2Cache);
     }
+    gt_list_begin();
 }
 
 /* Called by deko3d when the command memory runs out mid-recording. */
@@ -548,6 +664,7 @@ static void dk_wait_inflight_at(int line)
 static void dk_submit_wait_at(int line)
 {
     const u64 t0 = dk_now_us();
+    gt_list_end();
     DkCmdList list = dkCmdBufFinishList(s_dk.cmd);
     dkQueueSubmitCommands(s_dk.queue, list);
     dkQueueWaitIdle(s_dk.queue);
@@ -572,6 +689,7 @@ static void dk_submit_async(void)
 {
     if (!s_dk.async_present || !s_dk.set_ring[1]) { dk_submit_wait(); return; }
     const u64 t0 = dk_now_us();
+    gt_list_end();
     DkCmdList list = dkCmdBufFinishList(s_dk.cmd);
     dkQueueSubmitCommands(s_dk.queue, list);
     dkQueueSignalFence(s_dk.queue, &s_dk.set_fence[s_dk.set_cur], false);
@@ -1335,6 +1453,7 @@ static void be_present(void* user, u32 surface)
     dk_full_barrier();
     s_dk.bound_dirty = 1;
     dk_submit_async();
+    gt_present();
     /* Frame s_present_serial was just submitted; frames up to serial - 2 are done. */
     if (s_present_serial >= 2) dk_tex_pend_collect(s_present_serial - 2u);
     s_present_serial++;
@@ -2451,6 +2570,7 @@ static int dk_init_device(u32 width, u32 height)
         dk_log("second frame set unavailable: presents stay synchronous\n");
         s_dk.set_ring[1] = NULL;
     }
+    gt_init();
     { FILE* ps = fopen("sdmc:/switch/dbz-budokai-3-switch/present-sync", "r");
       s_dk.async_present = !ps;
       if (ps) fclose(ps); }

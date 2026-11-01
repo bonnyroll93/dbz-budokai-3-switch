@@ -143,3 +143,14 @@ Con 60 presentazioni/s, la logica gira 1:1 con il rendering. Rivedere `Logic60`:
 | | | Livello | 34,1 µs/draw, 32,8 ms/render | 24,3 µs/draw, 24,9 ms/render | Tenuta. FPS ancora limitati dal thread guest (passata 87–90 ms) |
 | `opt5-prof` (run60–62 contro run58) | T41 `ppu_regcache.py`: registri PPU in variabili locali nel codice lifted | Duello | guest 25,8 ms/passata | 25,1 ms/passata | Scartata (spenta di default). Guadagno ~3%; personaggi che scattano (run60) e crash del renderer su un indirizzo vertex non valido emesso dal guest (run61) |
 | `opt5-norc-prof` (run63) | Stessa build senza regcache | Duello | | guest ~25–26 ms, renderer ~16 ms per frame | Nessun crash né scatto: regcache era la causa |
+
+Nota sui confronti: dalle prove seguenti ogni build si confronta solo con una run fatta nella stessa configurazione (stessi `diag.on`, profiler PPU e metriche). Le build di profilo servono per le proporzioni, non per gli FPS assoluti. La correzione di "regcache ~3%" sopra: run60 (senza profiler PPU) era stata confrontata con run58 (con profiler), quindi quel numero non è affidabile.
+
+| Build (`-Feature`) | Modifica | Scenario | Prima | Dopo | Esito |
+|---|---|---|---|---|---|
+| `opt7-prof` (run65 contro run64, diag.on + profiler) | Accessor della memoria guest con controllo corto e `always_inline` | Duello | guest 27,3 ms/passata, codice 21,0 MB | 40,7 ms/passata, codice 38,2 MB | Scartata. +81% di codice, thread guest +49%: limite della cache istruzioni |
+| `opt8-prof` (run66 contro run64) | File lifted compilati con `-Os` | Duello | CPU guest 29,2 ms/frame, codice 21,0 MB | 35,3 ms/frame, codice 15,5 MB | Scartata (`PORT_SWITCH_PPU_OS` OFF). Codice più piccolo ma ottimizzato peggio |
+| `meas1-prof` (run67) | Misura: profiler ad albero (tempo inclusivo per funzione) e tempo GPU per frame (`t31-gpu-time.log`) | Duello | | GPU ~13 ms/frame (picchi 25–36 ms); "disegna una mesh" `0x0001AA00` = 29% del thread guest, applicazione materiale `0x0002C088` ~10% | Baseline per l'opzione A (riscrittura nativa del disegno mesh) |
+| `wtrack2-prof` (run69) | Tracciamento delle scritture di `0x0002C088` | Duello, mappa DU, livello | | 2 byte del materiale, campi renderer +0x284..+0x2A0, puntatore GCM e ~135 byte di comandi per chiamata | Elenco completo degli effetti, base della verifica |
+| `native1-prof` + `native-verify` (run70) | `0x0002C088` nativa con i 20 metodi del renderer e i 19 writer libgcm | Duello, mappa DU, livello | | 1.035.238 chiamate confrontate byte per byte, 0 differenze | Corretta |
+| `native1-prof` (run71 contro run67, diag.on + profiler) | Stessa, modalità normale | Duello | CPU guest 30,9 ms/frame | 25,2 ms/frame | Tenuta. Parte del guadagno è costo del profiler evitato: guadagno reale da misurare con build leggere |

@@ -83,6 +83,11 @@ option(PORT_SWITCH_PPU_LIFTFAST "Lifted PPU: drop dead trampoline drains, lean m
 #       showed jumping characters and a crash on a bad vertex address, and the
 #       duel gained only ~3%.
 option(PORT_SWITCH_PPU_REGCACHE "Lifted PPU: keep registers in locals in functions with a loop (Switch)" OFF)
+#   Native-A step 1 PORT_DBZ3_WTRACK  diagnostic: log the guest stores made
+#       while the listed functions run (dbz3_wtrack.cpp, t32-wtrack.log).
+#       Needs PORT_SWITCH_PPU_FUNC_PROFILE.
+option(PORT_DBZ3_WTRACK "Log guest stores made by selected lifted functions (Switch)" OFF)
+set(PORT_DBZ3_WTRACK_FNS "0002C088" CACHE STRING "Comma-separated guest functions for PORT_DBZ3_WTRACK")
 option(PORT_SWITCH_PPU_REGCACHE_ALL "Lifted PPU regcache: also rewrite functions without a loop (Switch)" ON)
 set(PPU_TU000 "${RECOMP_DIR}/ppu_recomp_000.cpp")
 set(PPU_TU004 "${RECOMP_DIR}/ppu_recomp_004.cpp")
@@ -111,9 +116,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" AND
         set(cur "${src}")
         if(PORT_SWITCH_PPU_FUNC_PROFILE)
             set(out "${_ppu_out}/${src_base}.prof.cpp")
+            set(_wt_args "")
+            if(PORT_DBZ3_WTRACK)
+                set(_wt_args "--wtrack" "${PORT_DBZ3_WTRACK_FNS}")
+            endif()
             add_custom_command(OUTPUT "${out}"
                 COMMAND ${CMAKE_COMMAND} -E make_directory "${_ppu_out}"
-                COMMAND "${_ppu_py}" -I "${_ppu_scripts}/ppu_instrument.py" "${cur}" "${out}"
+                COMMAND "${_ppu_py}" -I "${_ppu_scripts}/ppu_instrument.py" "${cur}" "${out}" ${_wt_args}
                 DEPENDS "${cur}" "${_ppu_scripts}/ppu_instrument.py" VERBATIM)
             set(cur "${out}")
         endif()
@@ -158,6 +167,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" AND
         endif()
     endforeach()
     set(RECOMP_SOURCES ${_ppu_new_sources})
+    if(PORT_DBZ3_WTRACK AND PORT_SWITCH_PPU_FUNC_PROFILE)
+        set_property(SOURCE ${RECOMP_SOURCES} APPEND PROPERTY COMPILE_DEFINITIONS DBZ3_WTRACK=1)
+        set(_dbz3_wtrack ON)   # dbz3_wtrack.cpp is added once the target exists
+        message(STATUS "Lifted PPU:      store tracker on (${PORT_DBZ3_WTRACK_FNS})")
+    endif()
     message(STATUS "Lifted PPU:      rewritten copies (neon=${PORT_SWITCH_PPU_VECNEON} profile=${PORT_SWITCH_PPU_FUNC_PROFILE} liftfast=${PORT_SWITCH_PPU_LIFTFAST} regcache=${PORT_SWITCH_PPU_REGCACHE} all=${PORT_SWITCH_PPU_REGCACHE_ALL})")
 endif()
 message(STATUS "Lifted sources:  ${RECOMP_SOURCE_COUNT} file(s)")
@@ -354,6 +368,9 @@ add_executable(${PROJECT_NAME}
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
     target_sources(${PROJECT_NAME} PRIVATE switch_app.c)
+    if(_dbz3_wtrack)
+        target_sources(${PROJECT_NAME} PRIVATE dbz3_wtrack.cpp)
+    endif()
     if(PORT_DBZ3_SCREENSHOT_CAPTURE)
         target_sources(${PROJECT_NAME} PRIVATE dbz3_capture.c)
     endif()
@@ -396,6 +413,29 @@ if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
                 COMPILE_OPTIONS "-ffp-contract=off")
             set(_dbz3_weak_overrides ON)   # applied after the lifted-source options below
             message(STATUS "DBZ3 native PPU functions: ON")
+            # Native-A step 1: material apply 0x0002C088 and the renderer and
+            # libgcm calls under it. It includes the lifted prelude, copied
+            # from the lift at build time, so it uses the same FP helpers.
+            option(PORT_DBZ3_NATIVE_MATERIAL "Native material apply (guest 0x0002C088)" ON)
+            if(PORT_DBZ3_NATIVE_MATERIAL)
+                set(_prelude "${CMAKE_CURRENT_BINARY_DIR}/native-inc/dbz3_lifted_prelude.inc")
+                add_custom_command(OUTPUT "${_prelude}"
+                    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/native-inc"
+                    COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/../../.venv/Scripts/python.exe" -I
+                            "${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/lifted_prelude.py"
+                            "${RECOMP_DIR}/ppu_recomp_000.cpp" "${_prelude}"
+                    DEPENDS "${RECOMP_DIR}/ppu_recomp_000.cpp"
+                            "${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/lifted_prelude.py" VERBATIM)
+                target_sources(${PROJECT_NAME} PRIVATE dbz3_native_material.cpp "${_prelude}")
+                set_property(SOURCE dbz3_native_material.cpp APPEND PROPERTY
+                    COMPILE_OPTIONS "-ffp-contract=off;-w")
+                set_property(SOURCE dbz3_native_material.cpp APPEND PROPERTY
+                    INCLUDE_DIRECTORIES "${CMAKE_CURRENT_BINARY_DIR}/native-inc")
+                set_property(SOURCE dbz3_native_material.cpp APPEND PROPERTY
+                    OBJECT_DEPENDS "${_prelude}")
+                set(_dbz3_native_material ON)
+                message(STATUS "DBZ3 native material apply: ON")
+            endif()
         endif()
         target_link_options(${PROJECT_NAME} PRIVATE "LINKER:--wrap=_Z13func_001FCAC4P11ppu_context")
         message(STATUS "DBZ3 gcm-const fast path: ON")
@@ -591,11 +631,23 @@ if(MSVC)
 else()
     set_source_files_properties(${RECOMP_SOURCES} PROPERTIES
         COMPILE_OPTIONS "-w;-ffp-contract=off")
+    # opt8: the lifted PPU code is sensitive to code size (opt7 inlined the
+    # memory accessors, grew .text 81% and the duel guest pass got 49% slower).
+    # Tried optimizing these TUs for size (the last -O on the line wins): .text
+    # shrank 26% but the duel guest CPU per frame rose 21% (run66 vs run64), so
+    # it stays OFF.
+    option(PORT_SWITCH_PPU_OS "Compile the lifted PPU sources with -Os (Switch)" OFF)
+    if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" AND PORT_SWITCH_PPU_OS)
+        set_property(SOURCE ${RECOMP_SOURCES} APPEND PROPERTY COMPILE_OPTIONS "-Os")
+    endif()
 endif()
 if(_dbz3_weak_overrides)
     # After the line above, which replaces the lifted sources' options.
     set_property(SOURCE "${PPU_TU000}" "${PPU_TU003}" "${PPU_TU004}" APPEND PROPERTY
         COMPILE_OPTIONS "-include;${CMAKE_CURRENT_SOURCE_DIR}/dbz3_weak_overrides.h")
+    if(_dbz3_native_material)
+        set_property(SOURCE "${PPU_TU000}" APPEND PROPERTY COMPILE_DEFINITIONS DBZ3_NATIVE_MATERIAL=1)
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------

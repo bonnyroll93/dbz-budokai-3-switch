@@ -55,6 +55,16 @@ void vm_write32(uint64_t, uint32_t);
 void vm_write64(uint64_t, uint64_t);
 }
 
+/* Native-A step 1 (PORT_DBZ3_WTRACK, diagnostic): report every guest store
+ * made while a tracked function runs on the main thread (dbz3_wtrack.cpp). */
+#ifdef DBZ3_WTRACK
+extern "C" volatile int g_dbz3_wtrack_on;
+extern "C" void dbz3_wtrack_note(uint32_t a, uint32_t n);
+#define LF_WT(a, n) do { if (__builtin_expect(g_dbz3_wtrack_on, 0)) dbz3_wtrack_note((a), (n)); } while (0)
+#else
+#define LF_WT(a, n) ((void)0)
+#endif
+
 LF_INLINE int lf_plain(uint32_t a)
 {
     return lf_fast_vm &&
@@ -102,12 +112,14 @@ LF_INLINE uint64_t lf_read64(uint64_t ea)
 LF_INLINE void lf_write8(uint64_t ea, uint8_t v)
 {
     const uint32_t a = (uint32_t)ea;
+    LF_WT(a, 1u);
     if (__builtin_expect(lf_plain(a) && !lf_reserved(a, 1), 1)) { lf_vm_base[a] = v; return; }
     vm_write8(ea, v);
 }
 LF_INLINE void lf_write16(uint64_t ea, uint16_t v)
 {
     const uint32_t a = (uint32_t)ea;
+    LF_WT(a, 2u);
     if (__builtin_expect(lf_plain(a) && !lf_reserved(a, 2), 1)) {
         const uint16_t s = __builtin_bswap16(v); memcpy(lf_vm_base + a, &s, 2); return;
     }
@@ -116,6 +128,7 @@ LF_INLINE void lf_write16(uint64_t ea, uint16_t v)
 LF_INLINE void lf_write32(uint64_t ea, uint32_t v)
 {
     const uint32_t a = (uint32_t)ea;
+    LF_WT(a, 4u);
     if (__builtin_expect(lf_plain(a) && !lf_reserved(a, 4), 1)) {
         const uint32_t s = __builtin_bswap32(v); memcpy(lf_vm_base + a, &s, 4); return;
     }
@@ -124,6 +137,7 @@ LF_INLINE void lf_write32(uint64_t ea, uint32_t v)
 LF_INLINE void lf_write64(uint64_t ea, uint64_t v)
 {
     const uint32_t a = (uint32_t)ea;
+    LF_WT(a, 8u);
     if (__builtin_expect(lf_plain(a) && !lf_reserved(a, 8), 1)) {
         const uint64_t s = __builtin_bswap64(v); memcpy(lf_vm_base + a, &s, 8); return;
     }
