@@ -1255,7 +1255,7 @@ static void dk_draw_debug_menu(const SwitchDebugSettings* settings, u32 fps_x10,
 {
     const u32 px = s_dk.width >= 1920 ? 4u : 3u;
     const u32 x = 24u, y = 58u, line = 9u * px;
-    const u32 box_w = 220u * px, box_h = 215u * px;
+    const u32 box_w = 220u * px, box_h = 233u * px;
     DkScissor bg = { x, y, box_w, box_h };
     dkCmdBufSetScissors(s_dk.cmd, 0, &bg, 1);
     dkCmdBufClearColorFloat(s_dk.cmd, 0, DkColorMask_RGBA, 0.04f, 0.06f, 0.12f, 1.0f);
@@ -1263,8 +1263,9 @@ static void dk_draw_debug_menu(const SwitchDebugSettings* settings, u32 fps_x10,
     dk_debug_text(x + 3u * px, y + 3u * px, "DEBUG MENU", px, 0.2f, 1.0f, 0.4f);
     dk_debug_text(x + 3u * px, y + 3u * px + line, "UP DOWN SELECT  LEFT RIGHT CHANGE  A ENTER  B CLOSE", px,
                   0.7f, 0.8f, 1.0f);
-    const char* labels[13];
+    const char* labels[15];
     char scale[80], fps[80], ms[80], draw_start[80], draw_step[80], gpu_aa[80], fps_stats[80];
+    char vsync[80], cap[80];
     snprintf(scale, sizeof scale, "RENDER SCALE: %d.%d  ACTIVE: %d.%d%s",
              settings->scale_tenths / 10, settings->scale_tenths % 10,
              settings->active_scale_tenths / 10, settings->active_scale_tenths % 10,
@@ -1273,19 +1274,21 @@ static void dk_draw_debug_menu(const SwitchDebugSettings* settings, u32 fps_x10,
     snprintf(ms, sizeof ms, "SHOW FRAME MS: %s", settings->show_frame_ms ? "ON" : "OFF");
     snprintf(gpu_aa, sizeof gpu_aa, "GPU FXAA: %s", settings->gpu_aa ? "ON" : "OFF");
     snprintf(fps_stats, sizeof fps_stats, "SHOW FPS STATS: %s", settings->show_fps_stats ? "ON" : "OFF");
+    snprintf(vsync, sizeof vsync, "VSYNC: %s", settings->vsync ? "ON" : "OFF  MAY TEAR");
+    snprintf(cap, sizeof cap, "FRAME CAP: %d", settings->frame_cap);
     snprintf(draw_start, sizeof draw_start, "DRAW START: %d  LEFT RIGHT STEP  ZL ZR 128", settings->draw_start);
     snprintf(draw_step, sizeof draw_step, "DRAW STEP: %d  CHANGE 8/1", settings->draw_step);
     /* Row ids match switch_input.c; a header precedes the first row of a group. */
-    labels[0] = scale; labels[1] = gpu_aa;
-    labels[2] = fps; labels[3] = ms; labels[4] = fps_stats; labels[5] = "RESET FPS STATS";
-    labels[6] = "SAVE SCREENSHOT";
-    labels[7] = settings->recording ? "STOP SCREEN RECORDING" : "START SCREEN RECORDING";
-    labels[8] = draw_start; labels[9] = draw_step; labels[10] = "CAPTURE NEXT DRAW FRAME";
-    labels[11] = "REBOOT APPLICATION"; labels[12] = "CLOSE MENU";
+    labels[0] = scale; labels[1] = gpu_aa; labels[2] = vsync; labels[3] = cap;
+    labels[4] = fps; labels[5] = ms; labels[6] = fps_stats; labels[7] = "RESET FPS STATS";
+    labels[8] = "SAVE SCREENSHOT";
+    labels[9] = settings->recording ? "STOP SCREEN RECORDING" : "START SCREEN RECORDING";
+    labels[10] = draw_start; labels[11] = draw_step; labels[12] = "CAPTURE NEXT DRAW FRAME";
+    labels[13] = "REBOOT APPLICATION"; labels[14] = "CLOSE MENU";
     static const char* const group_name[4] = { "DISPLAY", "PERFORMANCE", "CAPTURE", "SYSTEM" };
-    static const int group_first[4] = { 0, 2, 6, 11 };
+    static const int group_first[4] = { 0, 4, 8, 13 };
     u32 at = 3u;   /* menu line of the next row or header */
-    for (int i = 0; i < 13; i++) {
+    for (int i = 0; i < 15; i++) {
         for (int gi = 0; gi < 4; gi++) {
             if (group_first[gi] != i) continue;
             snprintf(label, sizeof label, "- %s -", group_name[gi]);
@@ -1369,6 +1372,29 @@ static void be_present(void* user, u32 surface)
                                    pitch, t0);
             }
         }
+    }
+    {   /* VSYNC / FRAME CAP (debug menu). With vsync the display paces the
+         * presents: swap interval 1 = every refresh, 2 = every other one (30).
+         * Without vsync the image is shown at once (it may tear) and a 30 cap
+         * waits here until 33.3 ms have passed since the previous present. */
+        static int cur_interval = -1;
+        static u64 last_present_us;
+        const int interval = settings.vsync ? (settings.frame_cap == 30 ? 2 : 1) : 0;
+        if (interval != cur_interval) {
+            dkSwapchainSetSwapInterval(s_dk.swapchain, (uint32_t)interval);
+            dk_log("swap interval %d (vsync %s, cap %d)\n", interval,
+                   settings.vsync ? "on" : "off", settings.frame_cap);
+            cur_interval = interval;
+        }
+        if (!settings.vsync && settings.frame_cap == 30) {
+            const u64 now = dk_now_us();
+            if (last_present_us && now - last_present_us < 33333u) {
+                const u64 wait_us = 33333u - (now - last_present_us);
+                struct timespec ts = { 0, (long)(wait_us * 1000u) };
+                nanosleep(&ts, NULL);
+            }
+        }
+        last_present_us = dk_now_us();
     }
     const int slot = dkQueueAcquireImage(s_dk.queue, s_dk.swapchain);
     if (slot < 0 || slot >= DK_NUM_SWAP) { s_dk.st.acquire_fail++; return; }

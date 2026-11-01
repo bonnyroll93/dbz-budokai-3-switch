@@ -16,6 +16,8 @@ typedef struct SwitchDebugSettings {
     int draw_step;
     int gpu_aa;
     int show_fps_stats;
+    int vsync;          /* 1: present on the display refresh, 0: present at once */
+    int frame_cap;      /* 60 or 30 frames per second at most */
 } SwitchDebugSettings;
 
 void switch_debug_init(void);
