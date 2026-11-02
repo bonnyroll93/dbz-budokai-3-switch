@@ -83,7 +83,7 @@ index 94de794..9cbeb9e 100644
      target_include_directories(ps3recomp_runtime PRIVATE "${PS3RECOMP_VULKAN_INCLUDE_DIR}")
      # PUBLIC: ps3recomp_host selects its backend on this definition.
 diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
-index b51fb7c..2945598 100644
+index b51fb7c..d0d9eeb 100644
 --- a/libs/audio/cellAudio.c
 +++ b/libs/audio/cellAudio.c
 @@ -34,7 +34,13 @@ extern uint32_t sys_event_queue_create_direct(uint64_t key, int32_t size);
@@ -321,19 +321,32 @@ index b51fb7c..2945598 100644
                  char map[36]; u32 b;
                  for (b = 0; b < nblock && b < 32; b++) {
                      const float* bp = port->buffer + b * CELL_AUDIO_BLOCK_SAMPLES * nch;
-@@ -496,7 +676,11 @@ static void audio_mix_one_block(void)
+@@ -496,7 +676,24 @@ static void audio_mix_one_block(void)
          /* Firmware clears a ring-buffer block after consuming it. Besides
           * preventing stale PCM from replaying when a producer stalls, the
           * cleared block is an observable consumption signal for producers. */
 +#ifdef __SWITCH__
-+        audio_block_fill_sentinel(src, nch);
++        /* audio-sentinel-off: clear to zero as the firmware does. The T29
++         * sentinel (a nonzero word) may read as "not consumed yet" to a
++         * producer that waits for a cleared block (run120: ~10% of blocks
++         * never rewritten while the ring stayed ~6/7 full). */
++        { static int s_zero_clear = -1;
++          if (s_zero_clear < 0) {
++              FILE* f = fopen("sdmc:/switch/dbz-budokai-3-switch/audio-sentinel-off", "r");
++              s_zero_clear = f != NULL;
++              if (f) fclose(f);
++              fprintf(stderr, "[cellAudio] consumed blocks cleared with %s\n",
++                      s_zero_clear ? "zeros (audio-sentinel-off)" : "the T29 sentinel");
++          }
++          if (s_zero_clear) memset(src, 0, CELL_AUDIO_BLOCK_SAMPLES * nch * sizeof(float));
++          else audio_block_fill_sentinel(src, nch); }
 +#else
          memset(src, 0, CELL_AUDIO_BLOCK_SAMPLES * nch * sizeof(float));
 +#endif
  
          /* Keep the monotonic counter for tags/timestamps, but publish the
           * ring slot to the guest. SurMixer multiplies this value by the block
-@@ -519,6 +703,10 @@ static void audio_mix_one_block(void)
+@@ -519,6 +716,10 @@ static void audio_mix_one_block(void)
   * Mixing thread
   * -----------------------------------------------------------------------*/
  
@@ -344,7 +357,7 @@ index b51fb7c..2945598 100644
  static void audio_notify_event_queues(void)
  {
      /* Push the audio-period event (data1 = CELL_AUDIO_EVENT_MIX = 0) to each
-@@ -528,9 +716,15 @@ static void audio_notify_event_queues(void)
+@@ -528,9 +729,15 @@ static void audio_notify_event_queues(void)
      for (int i = 0; i < CELL_AUDIO_MAX_NOTIFY_EVENT_QUEUES; i++) {
          if (!s_notify_queues[i].in_use) continue;
          uint32_t qid = sys_event_find_queue_by_key(s_notify_queues[i].key);
@@ -363,7 +376,7 @@ index b51fb7c..2945598 100644
      }
  }
  
-@@ -607,18 +801,69 @@ static void* audio_mix_thread_func(void* arg)
+@@ -607,18 +814,69 @@ static void* audio_mix_thread_func(void* arg)
  {
      (void)arg;
      printf("[cellAudio] Mixing thread started\n");
@@ -433,7 +446,7 @@ index b51fb7c..2945598 100644
      }
  
      printf("[cellAudio] Mixing thread stopped\n");
-@@ -808,6 +1053,10 @@ s32 cellAudioPortOpen(const CellAudioPortParam* param, u32* portNum)
+@@ -808,6 +1066,10 @@ s32 cellAudioPortOpen(const CellAudioPortParam* param, u32* portNum)
  
      port->buffer = (float*)(vm_base + guest_buf);     /* host view of guest buffer */
      memset(port->buffer, 0, port->buf_size);
@@ -1011,7 +1024,7 @@ index e9cf770..b7f96f4 100644
      swapcontext(&s_fibers[prev].context, &s_scheduler_context);
  #endif
 diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
-index 5e3b510..1944fad 100644
+index 5e3b510..33bcbdc 100644
 --- a/libs/spurs/cellSpurs.c
 +++ b/libs/spurs/cellSpurs.c
 @@ -70,6 +70,15 @@ typedef struct {
@@ -1217,7 +1230,7 @@ index 5e3b510..1944fad 100644
      static volatile long s_pm_off = -1;
      if (s_pm_off < 0) s_pm_off = getenv("PS3_NO_SPURS_PM") ? 1 : 0;
  
-@@ -2111,9 +2157,67 @@ s32 _cellSpursEventFlagInitialize(void* spurs, void* taskset,
+@@ -2111,9 +2157,68 @@ s32 _cellSpursEventFlagInitialize(void* spurs, void* taskset,
  }
  
  /* _cellSpursSendSignal — internal signal delivery */
@@ -1256,11 +1269,12 @@ index 5e3b510..1944fad 100644
 +                const uint32_t value = vm_read32(pb);
 +                vm_write32(label, value);
 +                /* +0x08: the word the PPU polls for "filter done" (non-zero). */
-+                { const uint32_t done = vm_read32(pb + 8);
-+                  if (done >= 0x10000u && done < 0x50000000u) vm_write32(done, 1); }
++                const uint32_t done = vm_read32(pb + 8);
++                if (done >= 0x10000u && done < 0x50000000u) vm_write32(done, 1);
 +                static int n = 0;
 +                if (n++ < 4)
-+                    printf("[cellSpurs] post-filter skipped: label 0x%08X = %u\n", label, value);
++                    printf("[cellSpurs] post-filter skipped: label 0x%08X = %u done word 0x%08X\n",
++                           label, value, done);
 +            }
 +        }
 +        return 1;
@@ -1285,7 +1299,7 @@ index 5e3b510..1944fad 100644
      printf("[cellSpurs] _SendSignal(taskset=0x%08X id=%u)\n", taskset_ea, taskId);
      /* Real delivery now that SPU tasks execute (comment was stale). */
      if (taskset_ea) spu_taskset_signal_task(taskset_ea, taskId);
-@@ -3300,3 +3404,119 @@ s32 cellSpursLFQueueAttachLv2EventQueue(u64 queue_ea)
+@@ -3300,3 +3405,119 @@ s32 cellSpursLFQueueAttachLv2EventQueue(u64 queue_ea)
      if (_n++ < 8) printf("[cellSpurs] LFQueueAttachLv2EventQueue(q=0x%08X)\n", (u32)queue_ea);
      return CELL_OK;
  }
