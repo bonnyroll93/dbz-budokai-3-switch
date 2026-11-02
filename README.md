@@ -45,16 +45,56 @@ through deko3d.
 
 - The game boots and runs on the Switch; menus, duels and Dragon Universe (DU)
   maps are playable.
+- **Duels run at 60 FPS at stock clocks** (Goku vs Vegeta, run139, 2 November
+  2026: 300 images every 5 s for the whole duel, never dropping to 30). See
+  [FPS milestones](#fps-milestones).
 - Namek in DU now renders its full terrain. The cause was a family of lifted
   AltiVec instructions (`vmulouh`, `vmuleuh`, `vsubsws`, `vaddshs`, `vmsumshm`)
   that read vector registers with the wrong byte order.
 - The same fix brought the finishing-move cutscenes back in sync.
 - Missed and delayed controls were fixed by reading the pad live on every logic
   step.
+- Saves are kept in the Switch save data of the chosen user, like installed
+  games (see [Save data](#save-data)).
 - Reproducible setup, build and packaging with PowerShell scripts.
+
+### FPS milestones
+
+All numbers are duels at stock clocks (CPU 1020 MHz), measured from the logs.
+The full history is in [ROADto60fps.md](ROADto60fps.md).
+
+| Date | Build / run | Duel | What changed |
+|---|---|---|---|
+| 29 Oct 2026 | `base60-light` | ~31 FPS (29-34) | Starting point: both the game thread (~30 ms per image) and the renderer (~22 ms) were over the 16.7 ms budget. |
+| 1 Nov 2026 | run89-92 | 30 FPS, cost per image falling | Native hot math (sin/cos, matrices) and draw-state writers: about -3 ms per frame on the game thread. |
+| 2 Nov 2026 | run105-113 | 30/60 switching | New 60 Hz pacer, triple buffering, three frame sets in flight. |
+| 2 Nov 2026 | run130-132 | renderer no longer the limit | Renderer split into two threads (`rsx_mt_backend.c`). |
+| 2 Nov 2026 | run135-137 | 60 Hz in light parts, 30 in heavy ones | Pacer tries 60 Hz instead of predicting it; native end-of-frame wait. |
+| 2 Nov 2026 | **run139** | **60 FPS for the whole duel** | Seven more native draw and animation functions. |
+
+Not measured again since the 60 FPS work: the DU map and the experience/level
+screen after a DU fight (both ~30 FPS or lower at the start).
+
+### Fixed recently
+
+- **NSP failed to install** with a progressive JPEG icon. The packager now
+  accepts only a baseline 256x256 JPEG and stops with a clear message otherwise.
+- **Saves outside the port folder**: earlier builds wrote them to
+  `sdmc:/gamedata/...`. They are moved automatically (see [Save data](#save-data)).
+- **Light build did not compile** after the end-of-frame wait counters
+  (`cellGcmSys.c` used a libnx header not included there).
+- **End-of-frame wait** (`0x002909C0`): the user-command callback is now
+  delivered by the waiting thread instead of whichever thread made the next
+  system call.
 
 ### Known bugs
 
+- **Missing Freezer shaders.** Two vertex shaders used by Freezer are not in
+  the build yet: 22 pipelines are refused and those draws are not shown. Fix in
+  progress: the default build now captures missing shaders (see step 5).
+- **Animation jerks.** Since the native draw functions, characters sometimes
+  jerk or their animation runs out of step with the gameplay. Not isolated yet;
+  test plan: turn the natives off one group at a time with the SD switches.
 - **Dragon Universe, UI.** Several menus flicker or are drawn twice, with the
   second copy offset.
 - **Dragon Universe, skin.** The character's skin is rendered white, only on the
@@ -63,17 +103,16 @@ through deko3d.
   suspect.
 - **Dragon Universe, flying.** At maximum flight speed, white pixel artifacts
   sometimes appear on screen.
-- **Audio.** Reverb is disabled and some sounds are sometimes not played. Audio
-  needs to be improved.
+- **Audio.** Reverb is disabled (`reverb.on` turns it back on) and about 10% of
+  the audio blocks arrive late, which can be heard as crackle. Not a CPU limit;
+  still under investigation.
 
-### Next goal: 60 FPS
+### Next goals
 
-Performance work so far aimed at a stable 30 FPS in duels, the DU map and the
-screen shown after a DU fight. The next goal is an optimization pass to reach
-60 FPS. Earlier measurements pointed at the CPU cost of the DU map task, the
-post-fight experience and level screen, and the per-draw work of the draw
-engine. Use the light build (below) for performance measurements and change one
-thing per build.
+- Freezer shaders and the animation jerks.
+- More headroom in duels: images often arrive just in time, so heavier scenes
+  (other stages, transformations, beam struggles) may still drop frames.
+- 60 FPS on the DU map and the level screen.
 
 ## Requirements
 
@@ -159,8 +198,9 @@ Both methods copy game data only, not the NSP. The SD destination is
 
 ### 5. Capture more shaders from the Switch
 
-Install and run the development NSP, then play through the scenes to cover.
-The Deko3D backend saves new variants to
+`ShaderCapture` is on in the default build configuration. Install and run the
+development NSP, then play through the scenes to cover (for example a duel
+with Freezer). The Deko3D backend saves new variants to
 `sdmc:/switch/dbz-budokai-3-switch/t23-shaders/`. Connect the Switch by USB,
 start **DBI > Run MTP responder**, then run:
 
@@ -192,7 +232,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build\switch-f
 
 The full package includes DBZ3 game data in RomFS and does not need the separate
 game-data copy step. It falls back to the SD card for files absent from RomFS.
-Logs, settings, and save data remain on SD. The output is
+Logs and settings remain on SD; saves go to the Switch save data (see
+[Save data](#save-data)). The output is
 `build/dev/dbz3/Dragonball-Z-Budokai-3-full.nsp`. Copy and install it manually.
 Both package types request Deko3D by default and use the limited software
 renderer if Deko3D initialization fails.
@@ -219,28 +260,90 @@ that `switch-dev.ps1` just built.
 | `ScreenshotCapture` | Includes the debug-menu screenshot and screen-recording code. |
 | `Logic60` | Keeps the 60 Hz gameplay timing. Leave it on. |
 
-**Maximum-performance build** (use this to measure FPS): `Lightweight = $true`
-and every other flag `$false` except `Logic60`. This is the current default.
+**Default build** (use this to play and to measure FPS): `Lightweight = $true`,
+`ShaderCapture = $true` (it only writes files when a shader is missing) and
+`Logic60`; everything else `$false`.
 
-**Debug build:** set `ScreenshotCapture = $true` to make the screenshot and
-recording rows of the debug menu work, `ShaderCapture = $true` to collect new
-shaders, and the profiler you need. `switch-dev.ps1` also accepts
-`-ProfilePpuFunctions`, `-LevelFunctionProfile`, `-InputQueueProfile` and
-`-Feature <name>`; the name is recorded in `build-info.txt`.
+**Metrics build** (use this to compare runs): `Lightweight = $false`,
+`LoopMetrics = $true`, `FrameClockMetrics = $true`, `ScreenshotCapture = $true`.
+`t26-loop-prof.log` then has a `pace` line every 150 images (`interval_us`
+16667 = 60 Hz, 33333 = 30 Hz, `est60_ema_us` = cost of a 60 Hz image, `late`)
+and an `fwait` line (time waiting for the GPU). Compare only runs of the same
+build type and the same scene (the project uses Goku vs Vegeta).
 
-Empty marker files in `sdmc:/switch/dbz-budokai-3-switch/` switch behaviour
-without a rebuild. Create them over MTP or with the SD card in a PC, and delete
-them to turn the option off:
+**Profiling build:** the metrics build plus `-ProfilePpuFunctions` and an empty
+`diag.on` file on the SD; gives `t23-ppu-hot.log` (game thread functions). Times
+are inflated by the profiler: use the proportions only.
+
+`switch-dev.ps1` also accepts `-ProfilePpuFunctions`, `-LevelFunctionProfile`,
+`-InputQueueProfile` and `-Feature <name>`; the name is recorded in
+`build-info.txt`.
+
+**Icon.** `icon.jpg` in the project root is used when present, otherwise the
+icon generated at import (`generated/dbz3/assets/icon.jpg`). It must be a
+baseline (not progressive) 256x256 JPEG; the packager refuses anything else.
+
+### SD switches
+
+Empty marker files in `sdmc:/switch/dbz-budokai-3-switch/` change behaviour
+without a rebuild. Create them over MTP or with the SD card in a PC, delete them
+to go back. Most are read once at start, so restart the game after a change.
+The defaults are the best settings: no file is needed to play.
+
+**Diagnostics and display**
 
 | File | Effect |
 |---|---|
-| `diag.on` | Verbose diagnostics and the GPU log (needs `Lightweight = $false`). |
-| `du-full-extra` | Runs the whole Dragon Universe task in the extra logic pass instead of only its update part. |
-| `repeat-draw-off` | Disables the repeated extra run of the DU draw task. |
+| `diag.on` | Verbose diagnostics, GPU and thread logs (`t22`, `t25`, `t31`; needs `Lightweight = $false`). Without it those logs are old copies. |
+| `fps-off` | Hides the FPS counter until the debug settings are first saved. |
+| `depth-clamp` | Depth clamp on (A/B test for terrain lost to near/far clipping). |
+| `map-capture-after` | Dumps the DU map draw passes (debug). |
+
+**Native code** (guest functions replaced by native C++; each one falls back to
+the translated PS3 code when its file exists)
+
+| File | Function |
+|---|---|
+| `native-b2-off` | All seven of the second batch below (color, texref, drawsetup, quad, sprite, sprite2, anim). |
+| `native-color-off` | Material color `0x0002C7D8`. |
+| `native-texref-off` | Texture reference `0x00031DC8`. |
+| `native-drawsetup-off` | Draw setup `0x0002F56C`. |
+| `native-quad-off` | Textured quad `0x00030790`. |
+| `native-sprite-off`, `native-sprite2-off` | Sprites `0x00030DF0`, `0x00031024`. |
+| `native-anim-off` | Bone animation `0x000207C0`. |
+| `native-material-off` | Material apply `0x0002C088`. |
+| `native-shader-off` | Shader program binds. |
+| `native-draw-off` | Draw-state functions (parameter block, arrays, textures). |
+| `native-sincos-off`, `native-matrix-off`, `native-point-off` | Math: sin/cos, quaternion matrix, matrix x point. |
+| `native-rotvec-off`, `native-scale-off`, `native-translate-off`, `native-add3-off`, `native-len3-off`, `native-planes-off`, `native-euler-off`, `native-memset-off` | Small math helpers and memset. |
+| `native-put4-off`, `native-put2f-off`, `native-put12-off`, `native-vcall3-off`, `native-transpose-off`, `native-vcall-a2o-off`, `native-a2o-off` | Draw-state writers and the direct `cellGcmAddressToOffset`. |
+| `native-verify` | Runs the translated code and the native one on the same input and compares them (`t37-native-math.log`). Slow; for testing only. |
+| `native-mesh-off`, `mesh-verify`, `mesh-selftest` | Mesh-body harness (only in builds with `PORT_DBZ3_NATIVE_MESH`, off by default). |
+| `fastvm-off` | Slower, checked guest memory access in the translated code. |
+
+**Renderer and timing**
+
+| File | Effect |
+|---|---|
+| `render-mt-off` | Renderer on one thread (no `render-draw` thread). |
+| `render-mt-sync` | Second thread kept but waited for at every image. |
+| `usercmd-pump-off` | End-of-frame wait as the translated code: callbacks delivered by other threads only. |
+| `postfx-nowait` | Skips the end-of-frame wait entirely. Risky (can corrupt memory); tests only. |
+| `present-sync` | Synchronous presents. |
 | `flush512` | Submits GPU work every 512 operations mid-frame (older behaviour). |
 | `texbatch-off` | One GPU wait per texture chunk (older behaviour). |
-| `present-sync` | Synchronous presents. |
-| `fps-off` | Hides the FPS counter until the debug settings are first saved. |
+| `texhash-per-use` | Re-hashes small textures on every use (older behaviour). |
+| `du-full-extra` | Runs the whole DU task in the extra logic pass instead of only its update part. |
+| `repeat-draw-off` | Disables the repeated extra run of the DU draw task. |
+
+**Audio and saves**
+
+| File | Effect |
+|---|---|
+| `reverb.on` | Turns the game's reverb back on (costs CPU). |
+| `bnus-prio-normal`, `bnus-prio-high` | Audio SPU thread at normal or high priority instead of the lowest. |
+| `audio-sentinel-off` | Played audio blocks cleared to zero, as the PS3 firmware does. |
+| `savedata-sd` | Saves on the SD card instead of the Switch save data. |
 
 To collect logs after a test, start **DBI > Run MTP responder** and run
 `scripts/pull-switch-logs.ps1 -Game dbz3`. Logs are copied to
@@ -255,23 +358,48 @@ receives no input.
 Press the same combination again, **B**, or choose **CLOSE MENU** to close it.
 
 **Move.** **Up/Down** select a row. **Left/Right** change a value, **A** runs an
-action. Render scale, FPS, frame time and FXAA are saved to
-`sdmc:/switch/dbz-budokai-3-switch/debug-settings.cfg` and restored at the next
-start.
+action. Render scale, FXAA, VSync, frame cap, FPS display and clocks are saved
+to `sdmc:/switch/dbz-budokai-3-switch/debug-settings.cfg` and restored at the
+next start.
 
 | Row | What it does |
 |---|---|
-| RENDER SCALE | Internal resolution, 0.0 to 1.0 in steps of 0.1. A change takes effect after **REBOOT APPLICATION**; the menu shows `REBOOT NEEDED` until then. |
+| **Display** | |
+| RENDER SCALE | Internal resolution, 0.0 to 1.0 in steps of 0.1, with the render size next to it, e.g. `0.7 (896X504)  ACTIVE: 1.0 (1280X720)`. A change takes effect after **REBOOT APPLICATION**; the menu shows `REBOOT NEEDED` until then. |
+| GPU FXAA | Toggles the GPU FXAA edge smoothing pass. |
+| VSYNC | On: images wait for the display refresh. Off: shown at once, may tear. |
+| FRAME CAP | **60**: 60 FPS, drops to 30 when a scene is too heavy (default). **30**: fixed 30. **OFF**: never forced down to 30; the rate varies between 30 and 60 and the game speed stays correct (it never goes above 60, because the game runs at least one logic step per image). |
+| **Performance** | |
 | SHOW FPS | Toggles the FPS counter at the top right. |
 | SHOW FRAME MS | Toggles the frame time readout. |
+| SHOW FPS STATS / RESET FPS STATS | Average, minimum and maximum FPS; reset them. |
+| CPU CLOCK, GPU CLOCK, RAM CLOCK | Optional overclock like sys-clk, limited to the recommended official rates: CPU 1224 to 1785 MHz, GPU 460 to 921 MHz, RAM 1600 MHz. **DEFAULT** leaves the system clock alone. `NOW` shows the clock read back from the system. The choice is re-applied after docking changes and the system clocks are restored at DEFAULT and at exit. Turn sys-clk off for this game when using it. All performance numbers in this README are at DEFAULT. |
+| **Capture** | |
 | SAVE SCREENSHOT (A) | Saves a JPEG to `captures/shot_*.jpg` and closes the menu. Needs `ScreenshotCapture`. |
 | START / STOP SCREEN RECORDING (A) | Records an MJPEG clip to `captures/clip_*.mjpg`. Needs `ScreenshotCapture`. |
 | DRAW START | First draw call a capture checkpoints from. Left/Right move by the draw step, **ZL/ZR** by 128. |
 | DRAW STEP | Toggles 8 or 1 draw calls between checkpoint images. |
 | CAPTURE NEXT DRAW FRAME (A) | Captures the next rendered frame draw by draw (see below) and closes the menu. |
+| **System** | |
 | REBOOT APPLICATION (A) | Restarts the game. |
 | CLOSE MENU (A) | Closes the menu. |
-| GPU FXAA | Toggles the GPU FXAA edge smoothing pass. |
+
+## Save data
+
+The game's PS3 saves (`cellSaveData`) are kept in the **Switch save data** of
+the user chosen at launch, like installed games: they appear in **System
+Settings > Data Management** and can be backed up with JKSV. The save is
+created on first use (32 MiB, 16 MiB journal) and every save is committed at
+once, so closing the game does not lose it.
+
+- At the first start, saves of earlier builds are moved from
+  `sdmc:/gamedata/dev_hdd0/...` to
+  `sdmc:/switch/dbz-budokai-3-switch/hdd0/home/00000001/savedata/`, and then
+  copied into the Switch save data. The SD copy stays as a backup but is not
+  updated any more.
+- If no user can be chosen or the save data cannot be opened, the game saves on
+  the SD (same folder). The `savedata-sd` file forces that.
+- What happened is written to `sdmc:/switch/dbz-budokai-3-switch/savedata.log`.
 
 ### Draw capture
 

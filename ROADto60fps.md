@@ -6,6 +6,27 @@
 
 Il lavoro precedente puntava a 30 FPS. Il budget ora si dimezza: ogni ms conta il doppio e il lavoro CPU per frame va portato a circa 14 ms nei casi pesanti (il resto è margine per sincronizzazione, audio e variazioni di carico).
 
+## Stato al 2 novembre 2026
+
+**Traguardo raggiunto nel duello: 60 FPS al clock normale.** Run139, Goku contro Vegeta, build metrics: circa 300 immagini ogni 5 s per tutto il duello, nessun ritorno a 30 Hz, fluido a vista (commit `e752cba`). All'inizio (29 ottobre, `base60-light`) il duello stava a ~31 FPS.
+
+| Passo | Run | Effetto nel duello |
+|---|---|---|
+| Funzioni matematiche native, scrittori dello stato di disegno | run89–92, run105 | circa −3 ms per immagine sul thread del gioco |
+| Nuovo regolatore 30/60, tre immagini in volo, triplo buffer | run100–113 | 60 Hz nei tratti leggeri |
+| Renderer su due thread (`rsx_mt_backend.c`) | run130–132 | il renderer non è più il limite |
+| Regolatore a tentativi; attesa di fine frame nativa | run135–137 | 60 Hz nei tratti leggeri, 30 nei pesanti (14,6–19 ms per immagine) |
+| Sette funzioni native di disegno e animazione | **run139** | **60 FPS per tutto il duello**, 12–16 ms per immagine |
+
+**Dove siamo adesso (run139).** Tutto è legato al refresh a 60 Hz: il thread `render-draw` passa ~10,5 dei suoi ~13,8 ms per immagine ad aspettare un'immagine libera dello schermo (`acquire`), il thread FIFO aspetta ~2,6 ms la coda piena e il gioco aspetta la GPU 4–5 ms. Lavoro reale per immagine: gioco ~9–11 ms, FIFO ~8,8 ms, `render-draw` ~3,3 ms. Le immagini arrivano spesso appena in tempo (`late` alto nel log del regolatore) e la GPU ha picchi isolati di 20–24 ms: il margine per scene più pesanti va misurato.
+
+**Ancora da fare**
+1. Misura del margine con `diag.on` (tempo GPU `t31`, CPU per thread `t25`) nello stesso duello; da dove vengono i picchi GPU.
+2. Shader mancanti di Freezer (2 vertex shader, 22 pipeline rifiutate): la build di default ora li cattura (`ShaderCapture = $true`).
+3. Bug degli scatti nelle animazioni (aperto dalle funzioni native del 31 ottobre–1 novembre, rimandato fino ai 60 FPS).
+4. Mappa DU e schermata livello: non più misurate dall'inizio del lavoro sui 60 FPS.
+5. Audio: ~10% dei blocchi in ritardo (gracchio), non dovuto alla CPU.
+
 ## Regole di lavoro
 
 1. **Si riparte da misure nuove.** I numeri dei vecchi `run03`–`run30` (documentati nella storia git, `docs/ROAD_MAP30fps.md`) sono usati solo come ipotesi, non come baseline: build, scene e finestre erano diverse e alcuni file di log erano stantii.
@@ -82,7 +103,7 @@ Non toccano la correttezza del codice lifted né la sequenza dei draw.
 
 | ID | Ipotesi | Verifica | Rischio |
 |---|---|---|---|
-| 1.1 | **Overclock/boost del clock: scartato.** Il gioco gira al clock normale (CPU 1020 MHz) e non si alza, per non pesare sulla batteria. Ogni guadagno deve venire da codice più efficiente. | | |
+| 1.1 | **Overclock come via per i 60 FPS: scartato.** Le misure si fanno al clock normale (CPU 1020 MHz) e ogni guadagno viene da codice più efficiente. Dal 2 novembre il menu debug offre un overclock facoltativo (CPU/GPU/RAM, solo valori consigliati, DEFAULT di base), che non entra nelle misure. | | |
 | 1.2 | **Ottimizzazione compilatore**: il target usa `-O1` per le TU PPU enormi, solo alcune a `-O2`. Verificare `-O2`/`-O3` sulle TU più calde (dal profilo PPU), LTO/`-fno-plt`, `-mcpu=cortex-a57+crypto`, `-ffast-math` solo per le parti non vettoriali. | Tempo del task dominante, dimensione binario | Medio: tempi di build lunghi; verificare che la semantica float non cambi |
 | 1.3 | **Affinità e priorità dei thread**: assegnare esplicitamente thread guest, draw engine e frame clock a core diversi (la Switch dà 3 core ai giochi) ed evitare che audio/input/IO competano con quello principale. | Carico per core, frame time | Basso |
 | 1.4 | **Costo per draw**: lavori già fatti (cache attributi VP, indice pipeline, texture state). Rimisurare cosa resta in `pipeline`, texture e vertex upload con il profilo nuovo. | µs/draw per fase | Basso |
@@ -204,4 +225,5 @@ Nota sui confronti: dalle prove seguenti ogni build si confronta solo con una ru
 | `gameprof-gv` (run136) | Profilo del thread del gioco (`-ProfilePpuFunctions`, `diag.on`), Goku contro Vegeta | Duello | | Pacer a 30 Hz il 62% del tempo; mesh `0x0001AA00` 18% incl., ma `0x000328A8` passa il tempo in funzioni già native (materiali 1,4%, stato di disegno 1,5%, parametri 0,9%; il lift resta ~2%); attesa `0x002909C0` 7%; resto piatto (1–2% per funzione). Task: `0x000D2310` 18%, `0x00094DD8` 9,4%, `0x000700D4` 8,2%, `0x0006FDF8` 6,5%, `0x000D1490` 6,5%, `0x00061CFC` 5% | Riscrivere le mesh a mano non conviene |
 | `fwait-metrics` (run137) | Attesa di fine frame `0x002909C0` nativa: consegna i callback GCM in sospeso a ogni giro (come `postfx-pump` di run126, ora con il renderer su due thread) e misura l'attesa divisa in prima/dopo che la FIFO raggiunge il comando utente (riga `fwait` in `t26`) | Goku contro Vegeta | | Consegna ~0 ms; attesa nel duello 0,1–1 ms per immagine, tutta "FIFO non ancora arrivata"; duello a 60 Hz 14,6–17 ms, nei tratti pesanti 17–19 ms | Tenuta, attiva di default (`usercmd-pump-off` per tornare al ciclo tradotto). L'attesa della GPU non è più un limite: il limite è il lavoro del thread del gioco |
 | `b2-menu-save` (run138–139) | Funzioni native lotto 2 in `dbz3_native_math.cpp`: colore materiale `0x0002C7D8`, texture `0x00031DC8`, preparazione disegno `0x0002F56C`, quad `0x00030790`, sprite `0x00030DF0`/`0x00031024`, animazione ossa `0x000207C0` (elemento 0 dei vettori in scalare, stesso ordine delle operazioni). Interruttori `native-*-off`, `native-b2-off` per tutte | Goku contro Vegeta | run137: 150–190 immagini ogni 5 s, ritorni a 30 Hz | **~300 immagini ogni 5 s (60 FPS) in tutto il duello**, stima 12–16 ms, nessun ritorno a 30 Hz; molte immagini appena in ritardo; il gioco aspetta la FIFO 4–5 ms per immagine e il thread `render-draw` è occupato ~16 ms per immagine | Tenuta, fluido a vista. **Il limite ora è il renderer** |
-| Default (build `light`) | Build leggera di default; tutto il meglio senza file sulla SD: disegno mesh nativo non più compilato (`PORT_DBZ3_NATIVE_MESH` OFF, nessun guadagno in run83–86); renderer su due thread, audio a priorità minima e funzioni native attivi di default | | | Interruttori rimasti solo per prove: `render-mt-off`, `render-mt-sync`, `bnus-prio-normal`/`-high`, `native-*-off`, `audio-sentinel-off`, `usercmd-early-on`, `usercmd-pump-off`, `native-b2-off`, `savedata-sd` | |
+| `shadercap` (build) | `ShaderCapture = $true` nella configurazione di default, per catturare gli shader di Freezer. Corretta la build leggera, che non compilava da `a873547` (`cellGcmSys.c` usava `armGetSystemTick` senza `switch.h`; ora legge `cntpct_el0` direttamente) | | | Compila | In attesa della cattura |
+| Default (build `light`) | Build leggera di default; tutto il meglio senza file sulla SD: disegno mesh nativo non più compilato (`PORT_DBZ3_NATIVE_MESH` OFF, nessun guadagno in run83–86); renderer su due thread, audio a priorità minima e funzioni native attivi di default | | | Interruttori rimasti solo per prove: `render-mt-off`, `render-mt-sync`, `bnus-prio-normal`/`-high`, `native-*-off`, `audio-sentinel-off`, `usercmd-pump-off`, `native-b2-off`, `savedata-sd` (`usercmd-early-on` è stato tolto) | |
