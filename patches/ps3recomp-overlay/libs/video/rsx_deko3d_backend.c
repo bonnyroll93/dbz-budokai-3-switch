@@ -1255,6 +1255,8 @@ static unsigned dk_debug_glyph(char c)
     if (c == '-') return 0x01C0;
     if (c == '+') return 0x05D0;
     if (c == '/') return 0x1248;
+    if (c == '(') return 0x2922;
+    if (c == ')') return 0x224A;
     return 0;
 }
 
@@ -1273,49 +1275,79 @@ static void dk_debug_text(u32 x, u32 y, const char* str, u32 px,
     }
 }
 
+static u32 s_menu_logical_w = 1280u, s_menu_logical_h = 720u;   /* last presented image */
+static u32 s_menu_render_w, s_menu_render_h;
+
 static void dk_draw_debug_menu(const SwitchDebugSettings* settings, u32 fps_x10,
                                u32 frame_ms_x10)
 {
     const u32 px = s_dk.width >= 1920 ? 4u : 3u;
-    const u32 x = 24u, y = 58u, line = 9u * px;
-    const u32 box_w = 220u * px, box_h = 233u * px;
+    const u32 x = 24u, y = 24u, line = 8u * px;
+    const u32 box_w = 280u * px, box_h = 232u * px;   /* 28 lines of 8 + padding */
     DkScissor bg = { x, y, box_w, box_h };
     dkCmdBufSetScissors(s_dk.cmd, 0, &bg, 1);
     dkCmdBufClearColorFloat(s_dk.cmd, 0, DkColorMask_RGBA, 0.04f, 0.06f, 0.12f, 1.0f);
-    char label[80];
+    char label[96];
     dk_debug_text(x + 3u * px, y + 3u * px, "DEBUG MENU", px, 0.2f, 1.0f, 0.4f);
     dk_debug_text(x + 3u * px, y + 3u * px + line, "UP DOWN SELECT  LEFT RIGHT CHANGE  A ENTER  B CLOSE", px,
                   0.7f, 0.8f, 1.0f);
-    const char* labels[15];
-    char scale[80], fps[80], ms[80], draw_start[80], draw_step[80], gpu_aa[80], fps_stats[80];
-    char vsync[80], cap[80];
-    snprintf(scale, sizeof scale, "RENDER SCALE: %d.%d  ACTIVE: %d.%d%s",
-             settings->scale_tenths / 10, settings->scale_tenths % 10,
-             settings->active_scale_tenths / 10, settings->active_scale_tenths % 10,
-             settings->scale_tenths != settings->active_scale_tenths ? "  REBOOT NEEDED" : "");
+    const char* labels[DBG_ROW_COUNT];
+    char scale[96], fps[80], ms[80], draw_start[80], draw_step[80], gpu_aa[80], fps_stats[80];
+    char vsync[80], cap[80], oc[3][80];
+    {   /* render size = guest size x scale, as dk_scaled_dim */
+        const u32 lw = s_menu_logical_w, lh = s_menu_logical_h;
+        const u32 st = (u32)settings->scale_tenths;
+        u32 rw = (lw * st + 5u) / 10u, rh = (lh * st + 5u) / 10u;
+        if (!rw) rw = 1u;
+        if (!rh) rh = 1u;
+        const u32 aw = s_menu_render_w ? s_menu_render_w : lw;
+        const u32 ah = s_menu_render_h ? s_menu_render_h : lh;
+        snprintf(scale, sizeof scale, "RENDER SCALE: %d.%d (%uX%u)  ACTIVE: %d.%d (%uX%u)%s",
+                 settings->scale_tenths / 10, settings->scale_tenths % 10, rw, rh,
+                 settings->active_scale_tenths / 10, settings->active_scale_tenths % 10, aw, ah,
+                 settings->scale_tenths != settings->active_scale_tenths ? "  REBOOT NEEDED" : "");
+    }
     snprintf(fps, sizeof fps, "SHOW FPS: %s", settings->show_fps ? "ON" : "OFF");
     snprintf(ms, sizeof ms, "SHOW FRAME MS: %s", settings->show_frame_ms ? "ON" : "OFF");
     snprintf(gpu_aa, sizeof gpu_aa, "GPU FXAA: %s", settings->gpu_aa ? "ON" : "OFF");
     snprintf(fps_stats, sizeof fps_stats, "SHOW FPS STATS: %s", settings->show_fps_stats ? "ON" : "OFF");
     snprintf(vsync, sizeof vsync, "VSYNC: %s", settings->vsync ? "ON" : "OFF  MAY TEAR");
-    snprintf(cap, sizeof cap, "FRAME CAP: %d", settings->frame_cap);
+    if (settings->frame_cap == 30) snprintf(cap, sizeof cap, "FRAME CAP: 30");
+    else if (settings->frame_cap == 0) snprintf(cap, sizeof cap, "FRAME CAP: OFF  (30-60 FREE)");
+    else snprintf(cap, sizeof cap, "FRAME CAP: 60  (DROPS TO 30 IF SLOW)");
+    {
+        static const char* const name[3] = { "CPU", "GPU", "RAM" };
+        for (int d = 0; d < 3; d++) {
+            char now[24] = "";
+            if (settings->oc_now_mhz[d] > 0) snprintf(now, sizeof now, "  NOW %d MHZ", settings->oc_now_mhz[d]);
+            if (settings->oc_mhz[d]) snprintf(oc[d], sizeof oc[d], "%s CLOCK: %d MHZ%s", name[d], settings->oc_mhz[d], now);
+            else snprintf(oc[d], sizeof oc[d], "%s CLOCK: DEFAULT%s", name[d], now);
+        }
+    }
     snprintf(draw_start, sizeof draw_start, "DRAW START: %d  LEFT RIGHT STEP  ZL ZR 128", settings->draw_start);
     snprintf(draw_step, sizeof draw_step, "DRAW STEP: %d  CHANGE 8/1", settings->draw_step);
-    /* Row ids match switch_input.c; a header precedes the first row of a group. */
-    labels[0] = scale; labels[1] = gpu_aa; labels[2] = vsync; labels[3] = cap;
-    labels[4] = fps; labels[5] = ms; labels[6] = fps_stats; labels[7] = "RESET FPS STATS";
-    labels[8] = "SAVE SCREENSHOT";
-    labels[9] = settings->recording ? "STOP SCREEN RECORDING" : "START SCREEN RECORDING";
-    labels[10] = draw_start; labels[11] = draw_step; labels[12] = "CAPTURE NEXT DRAW FRAME";
-    labels[13] = "REBOOT APPLICATION"; labels[14] = "CLOSE MENU";
+    labels[DBG_ROW_SCALE] = scale; labels[DBG_ROW_FXAA] = gpu_aa; labels[DBG_ROW_VSYNC] = vsync;
+    labels[DBG_ROW_CAP] = cap; labels[DBG_ROW_FPS] = fps; labels[DBG_ROW_FRAME_MS] = ms;
+    labels[DBG_ROW_FPS_STATS] = fps_stats; labels[DBG_ROW_FPS_RESET] = "RESET FPS STATS";
+    labels[DBG_ROW_OC_CPU] = oc[0]; labels[DBG_ROW_OC_GPU] = oc[1]; labels[DBG_ROW_OC_RAM] = oc[2];
+    labels[DBG_ROW_SCREENSHOT] = "SAVE SCREENSHOT";
+    labels[DBG_ROW_RECORD] = settings->recording ? "STOP SCREEN RECORDING" : "START SCREEN RECORDING";
+    labels[DBG_ROW_DRAW_START] = draw_start; labels[DBG_ROW_DRAW_STEP] = draw_step;
+    labels[DBG_ROW_DRAW_CAPTURE] = "CAPTURE NEXT DRAW FRAME";
+    labels[DBG_ROW_REBOOT] = "REBOOT APPLICATION"; labels[DBG_ROW_CLOSE] = "CLOSE MENU";
     static const char* const group_name[4] = { "DISPLAY", "PERFORMANCE", "CAPTURE", "SYSTEM" };
-    static const int group_first[4] = { 0, 4, 8, 13 };
+    static const int group_first[4] = { DBG_ROW_SCALE, DBG_ROW_FPS, DBG_ROW_SCREENSHOT, DBG_ROW_REBOOT };
     u32 at = 3u;   /* menu line of the next row or header */
-    for (int i = 0; i < 15; i++) {
+    for (int i = 0; i < DBG_ROW_COUNT; i++) {
         for (int gi = 0; gi < 4; gi++) {
             if (group_first[gi] != i) continue;
             snprintf(label, sizeof label, "- %s -", group_name[gi]);
             dk_debug_text(x + 3u * px, y + 3u * px + at * line, label, px, 0.4f, 0.8f, 1.0f);
+            at++;
+        }
+        if (i == DBG_ROW_OC_CPU) {
+            dk_debug_text(x + 3u * px, y + 3u * px + at * line, "  OVERCLOCK  RECOMMENDED RATES  DEFAULT = SYSTEM",
+                          px, 0.9f, 0.7f, 0.3f);
             at++;
         }
         u32 yy = y + 3u * px + at * line;
@@ -1406,6 +1438,12 @@ static void be_present(void* user, u32 surface)
                          s_dk.surfaces[surface].used &&
                          s_dk.surfaces[surface].fmt == RSX_BE_FMT_R8G8B8A8;
     SwitchDebugSettings settings = switch_debug_snapshot();
+    if (have_src && s_dk.surfaces[surface].logical_w && s_dk.surfaces[surface].logical_h) {
+        s_menu_logical_w = s_dk.surfaces[surface].logical_w;
+        s_menu_logical_h = s_dk.surfaces[surface].logical_h;
+        s_menu_render_w = s_dk.surfaces[surface].w;
+        s_menu_render_h = s_dk.surfaces[surface].h;
+    }
     if (have_src && dbz3_capture_wants_frame && dbz3_capture_frame &&
         dbz3_capture_wants_frame(t0)) {
         dk_target *t = &s_dk.surfaces[surface];

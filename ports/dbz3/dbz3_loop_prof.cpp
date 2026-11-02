@@ -58,6 +58,8 @@ extern "C" uint64_t g_dbz3_adx_sur_calls;   /* dbz3_audio_trace.cpp */
 
 /* Scheduler task running now, for the allocator trace (dbz3_heap_trace.cpp). */
 extern "C" { uint32_t g_dbz3_cur_task_fn = 0; int g_dbz3_cur_pass = 0; }
+/* Debug menu FRAME CAP (switch_input.c): 60, 30 or 0 = off. */
+extern "C" __attribute__((weak)) int switch_debug_frame_cap(void);
 /* End-of-frame wait counters, filled by 0x002909C0 (dbz3_native_math.cpp). */
 extern "C" { uint64_t g_fw_waits, g_fw_wait_ticks, g_fw_fifo_ticks, g_fw_deliver_ticks, g_fw_max_ticks; }
 #ifdef PORT_DBZ3_HEAP_TRACE
@@ -423,7 +425,17 @@ void pace_before_flip(void)
         const double est = work > extra ? work - extra : 0.0;
         g_pace_work_ema = g_pace_work_ema == 0.0 ? work : g_pace_work_ema * 0.9 + work * 0.1;
         g_pace_est_ema = g_pace_est_ema == 0.0 ? est : g_pace_est_ema * 0.9 + est * 0.1;
-        if (g_pace_interval_us == 16667) {
+        /* Debug menu FRAME CAP: 30 holds 30 Hz, OFF holds the 60 Hz grid and
+         * never drops to 30 (late images are shown at once, so the rate varies
+         * between 30 and 60; at least one logic step runs per image, so the
+         * grid stays as the upper bound). 60 is the automatic choice below. */
+        const int cap = switch_debug_frame_cap ? switch_debug_frame_cap() : 60;
+        if (cap == 30 || cap == 0) {
+            const uint64_t want = cap == 30 ? 33333u : 16667u;
+            if (g_pace_interval_us != want) { g_pace_interval_us = want; g_pace_switches++; }
+            g_pace_probe = 0;
+            g_pace_hold = 0;
+        } else if (g_pace_interval_us == 16667) {
             g_pace_at60++;
             if (g_pace_probe) {
                 if (--g_pace_probe == 0) {

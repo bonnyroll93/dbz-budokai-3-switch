@@ -4,6 +4,7 @@
 #include <switch.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static PadState controllers[PS3_PLATFORM_PAD_COUNT];
@@ -58,16 +59,126 @@ static atomic_int debug_gpu_aa;
 static atomic_int debug_fps_stats;
 static atomic_int debug_fps_reset;
 static atomic_int debug_vsync = 1;
-static atomic_int debug_cap30;
+static atomic_int debug_cap = 60;   /* 60, 30 or 0 (off) */
 static int debug_active_scale;
 static u64 debug_old_buttons;
 static int debug_suppress_until_release;
+
+/* ---- OVERCLOCK (debug menu) -------------------------------------------------
+ * Like sys-clk: CPU, GPU and RAM clocks set through clkrst (pcv before 8.0.0),
+ * limited to the recommended official rates. 0 = the system's clock, left
+ * alone. The system puts its own clocks back on dock changes and performance
+ * mode changes, so the chosen rates are checked and set again about once a
+ * second; the system rate seen last is put back when DEFAULT is chosen again
+ * and at exit. Nothing is read or set while every row is DEFAULT and the
+ * menu is closed. */
+static const int oc_cpu_choices[] = { 0, 1224, 1428, 1581, 1785 };
+static const int oc_gpu_choices[] = { 0, 460, 614, 768, 921 };
+static const int oc_ram_choices[] = { 0, 1600 };
+static const int* const oc_choices[3] = { oc_cpu_choices, oc_gpu_choices, oc_ram_choices };
+static const int oc_choice_count[3] = { 5, 5, 2 };
+static atomic_int debug_oc[3];       /* MHz, 0 = default */
+static atomic_int debug_oc_now[3];   /* MHz read back */
+static u32 oc_stock_hz[3];
+static int oc_applied[3];
+static int oc_service = -1;          /* -1 not tried, 0 unavailable, 1 clkrst, 2 pcv */
+static Mutex oc_lock;
+static u64 oc_last_tick;
+static const PcvModuleId oc_module_id[3] = { PcvModuleId_CpuBus, PcvModuleId_GPU, PcvModuleId_EMC };
+static const PcvModule oc_module[3] = { PcvModule_CpuBus, PcvModule_GPU, PcvModule_EMC };
+
+static int oc_valid(int domain, int mhz)
+{
+    for (int i = 0; i < oc_choice_count[domain]; i++)
+        if (oc_choices[domain][i] == mhz) return 1;
+    return 0;
+}
+
+static u32 oc_hz(int domain, int mhz)
+{
+    if (domain == 1)   /* GPU rates are multiples of 76.8 MHz */
+        return mhz == 460 ? 460800000u : mhz == 614 ? 614400000u :
+               mhz == 768 ? 768000000u : 921600000u;
+    return (u32)mhz * 1000000u;
+}
+
+static void oc_service_init(void)
+{
+    if (oc_service >= 0) return;
+    if (hosversionAtLeast(8, 0, 0)) oc_service = R_SUCCEEDED(clkrstInitialize()) ? 1 : 0;
+    else oc_service = R_SUCCEEDED(pcvInitialize()) ? 2 : 0;
+}
+
+static int oc_get(int d, u32 *hz)
+{
+    if (oc_service == 1) {
+        ClkrstSession session;
+        if (R_FAILED(clkrstOpenSession(&session, oc_module_id[d], 3))) return 0;
+        const Result rc = clkrstGetClockRate(&session, hz);
+        clkrstCloseSession(&session);
+        return R_SUCCEEDED(rc);
+    }
+    if (oc_service == 2) return R_SUCCEEDED(pcvGetClockRate(oc_module[d], hz));
+    return 0;
+}
+
+static void oc_set(int d, u32 hz)
+{
+    if (oc_service == 1) {
+        ClkrstSession session;
+        if (R_FAILED(clkrstOpenSession(&session, oc_module_id[d], 3))) return;
+        clkrstSetClockRate(&session, hz);
+        clkrstCloseSession(&session);
+    } else if (oc_service == 2) {
+        pcvSetClockRate(oc_module[d], hz);
+    }
+}
+
+static void oc_maintain(int force)
+{
+    int wanted = 0;
+    for (int d = 0; d < 3; d++) wanted |= atomic_load(&debug_oc[d]) != 0 || oc_applied[d];
+    if (!force && !wanted && !atomic_load(&debug_menu)) return;
+    const u64 now_tick = armGetSystemTick();
+    if (!force && now_tick - oc_last_tick < armGetSystemTickFreq()) return;
+    oc_last_tick = now_tick;
+    mutexLock(&oc_lock);
+    oc_service_init();
+    for (int d = 0; d < 3 && oc_service > 0; d++) {
+        const int mhz = atomic_load(&debug_oc[d]);
+        u32 now = 0;
+        const int have = oc_get(d, &now);
+        if (!mhz) {
+            if (oc_applied[d]) {
+                oc_set(d, oc_stock_hz[d]);
+                oc_applied[d] = 0;
+            }
+        } else if (have) {
+            const u32 want = oc_hz(d, mhz);
+            if (now != want) {
+                /* Not ours: the system's rate for the current mode. */
+                oc_stock_hz[d] = now;
+                oc_applied[d] = 1;
+                oc_set(d, want);
+            }
+        }
+        if (oc_get(d, &now)) atomic_store(&debug_oc_now[d], (int)((now + 500000u) / 1000000u));
+    }
+    mutexUnlock(&oc_lock);
+}
+
+static void oc_restore_at_exit(void)
+{
+    for (int d = 0; d < 3; d++) atomic_store(&debug_oc[d], 0);
+    oc_maintain(1);
+}
 
 void switch_debug_init(void)
 {
     int expected = 0;
     if (atomic_compare_exchange_strong(&debug_init_state, &expected, 1)) {
-        int scale = 10, fps = 1, frame_ms = 0, gpu_aa = 0, fps_stats = 0, vsync = 1, cap30 = 0;
+        int scale = 10, fps = 1, frame_ms = 0, gpu_aa = 0, fps_stats = 0, vsync = 1, cap = 60;
+        int oc[3] = { 0, 0, 0 };
         FILE *f = fopen(DEBUG_SETTINGS_PATH, "r");
         if (f) {
             char line[80];
@@ -80,7 +191,11 @@ void switch_debug_init(void)
                 else if (sscanf(line, "gpu_fxaa=%d", &value) == 1) gpu_aa = !!value;
                 else if (sscanf(line, "show_fps_stats=%d", &value) == 1) fps_stats = !!value;
                 else if (sscanf(line, "vsync=%d", &value) == 1) vsync = !!value;
-                else if (sscanf(line, "frame_cap=%d", &value) == 1) cap30 = value == 30;
+                else if (sscanf(line, "frame_cap=%d", &value) == 1)
+                    cap = (value == 30 || value == 0) ? value : 60;
+                else if (sscanf(line, "oc_cpu_mhz=%d", &value) == 1 && oc_valid(0, value)) oc[0] = value;
+                else if (sscanf(line, "oc_gpu_mhz=%d", &value) == 1 && oc_valid(1, value)) oc[1] = value;
+                else if (sscanf(line, "oc_ram_mhz=%d", &value) == 1 && oc_valid(2, value)) oc[2] = value;
             }
             fclose(f);
         } else {
@@ -95,8 +210,11 @@ void switch_debug_init(void)
         atomic_store(&debug_gpu_aa, gpu_aa);
         atomic_store(&debug_fps_stats, fps_stats);
         atomic_store(&debug_vsync, vsync);
-        atomic_store(&debug_cap30, cap30);
+        atomic_store(&debug_cap, cap);
+        for (int d = 0; d < 3; d++) atomic_store(&debug_oc[d], oc[d]);
         atomic_store(&debug_init_state, 2);
+        atexit(oc_restore_at_exit);
+        if (oc[0] || oc[1] || oc[2]) oc_maintain(1);
     } else {
         while (atomic_load(&debug_init_state) != 2) svcSleepThread(1000000);
     }
@@ -107,10 +225,11 @@ static void switch_debug_save(void)
     FILE *f = fopen(DEBUG_SETTINGS_PATH ".tmp", "w");
     if (!f) return;
     fprintf(f, "render_scale_tenths=%d\nshow_fps=%d\nshow_frame_ms=%d\ngpu_fxaa=%d\nshow_fps_stats=%d\n"
-               "vsync=%d\nframe_cap=%d\n",
+               "vsync=%d\nframe_cap=%d\noc_cpu_mhz=%d\noc_gpu_mhz=%d\noc_ram_mhz=%d\n",
             atomic_load(&debug_scale), atomic_load(&debug_fps), atomic_load(&debug_frame_ms),
             atomic_load(&debug_gpu_aa), atomic_load(&debug_fps_stats),
-            atomic_load(&debug_vsync), atomic_load(&debug_cap30) ? 30 : 60);
+            atomic_load(&debug_vsync), atomic_load(&debug_cap),
+            atomic_load(&debug_oc[0]), atomic_load(&debug_oc[1]), atomic_load(&debug_oc[2]));
     if (fclose(f) != 0) return;
     remove(DEBUG_SETTINGS_PATH);
     rename(DEBUG_SETTINGS_PATH ".tmp", DEBUG_SETTINGS_PATH);
@@ -126,9 +245,17 @@ SwitchDebugSettings switch_debug_snapshot(void)
         atomic_load(&debug_reboot_error), atomic_load(&debug_recording),
         atomic_load(&debug_draw_start), atomic_load(&debug_draw_step),
         atomic_load(&debug_gpu_aa), atomic_load(&debug_fps_stats),
-        atomic_load(&debug_vsync), atomic_load(&debug_cap30) ? 30 : 60
+        atomic_load(&debug_vsync), atomic_load(&debug_cap),
+        { atomic_load(&debug_oc[0]), atomic_load(&debug_oc[1]), atomic_load(&debug_oc[2]) },
+        { atomic_load(&debug_oc_now[0]), atomic_load(&debug_oc_now[1]), atomic_load(&debug_oc_now[2]) }
     };
     return s;
+}
+
+int switch_debug_frame_cap(void)
+{
+    switch_debug_init();
+    return atomic_load(&debug_cap);
 }
 
 int switch_debug_input(uint64_t buttons)
@@ -139,14 +266,15 @@ int switch_debug_input(uint64_t buttons)
     const int combo_old = (debug_old_buttons & combo) == combo;
     const u64 pressed = buttons & ~debug_old_buttons;
     debug_old_buttons = buttons;
+    oc_maintain(0);
     if (combo_down && !combo_old) {
         atomic_store(&debug_menu, !atomic_load(&debug_menu));
         debug_suppress_until_release = 1;
     }
     if (atomic_load(&debug_menu)) {
         int row = atomic_load(&debug_selected);
-        if (pressed & HidNpadButton_Up) row = (row + 14) % 15;
-        if (pressed & HidNpadButton_Down) row = (row + 1) % 15;
+        if (pressed & HidNpadButton_Up) row = (row + DBG_ROW_COUNT - 1) % DBG_ROW_COUNT;
+        if (pressed & HidNpadButton_Down) row = (row + 1) % DBG_ROW_COUNT;
         atomic_store(&debug_selected, row);
         if (pressed & HidNpadButton_B) {
             atomic_store(&debug_menu, 0);
@@ -154,53 +282,63 @@ int switch_debug_input(uint64_t buttons)
         } else if (pressed & (HidNpadButton_Left | HidNpadButton_Right |
                               HidNpadButton_A | HidNpadButton_ZL | HidNpadButton_ZR)) {
             int delta = (pressed & HidNpadButton_Left) ? -1 : 1;
-            if (row == 0) {
+            if (row == DBG_ROW_SCALE) {
                 int scale = atomic_load(&debug_scale) + delta;
                 if (scale >= 0 && scale <= 10) atomic_store(&debug_scale, scale);
                 switch_debug_save();
-            } else if (row == 1) {
+            } else if (row == DBG_ROW_FXAA) {
                 atomic_store(&debug_gpu_aa, !atomic_load(&debug_gpu_aa));
                 switch_debug_save();
-            } else if (row == 2) {
+            } else if (row == DBG_ROW_VSYNC) {
                 atomic_store(&debug_vsync, !atomic_load(&debug_vsync));
                 switch_debug_save();
-            } else if (row == 3) {
-                atomic_store(&debug_cap30, !atomic_load(&debug_cap30));
+            } else if (row == DBG_ROW_CAP) {
+                static const int caps[3] = { 60, 30, 0 };
+                int i = 0;
+                while (i < 2 && caps[i] != atomic_load(&debug_cap)) i++;
+                atomic_store(&debug_cap, caps[(i + 3 + delta) % 3]);
                 switch_debug_save();
-            } else if (row == 4) {
+            } else if (row == DBG_ROW_FPS) {
                 atomic_store(&debug_fps, !atomic_load(&debug_fps));
                 switch_debug_save();
-            } else if (row == 5) {
+            } else if (row == DBG_ROW_FRAME_MS) {
                 atomic_store(&debug_frame_ms, !atomic_load(&debug_frame_ms));
                 switch_debug_save();
-            } else if (row == 6) {
+            } else if (row == DBG_ROW_FPS_STATS) {
                 atomic_store(&debug_fps_stats, !atomic_load(&debug_fps_stats));
                 switch_debug_save();
-            } else if (row == 7 && (pressed & HidNpadButton_A)) {
+            } else if (row == DBG_ROW_FPS_RESET && (pressed & HidNpadButton_A)) {
                 atomic_store(&debug_fps_reset, 1);
-            } else if (row == 8 && (pressed & HidNpadButton_A)) {
+            } else if (row >= DBG_ROW_OC_CPU && row <= DBG_ROW_OC_RAM) {
+                const int d = row - DBG_ROW_OC_CPU, n = oc_choice_count[d];
+                int i = 0;
+                while (i < n - 1 && oc_choices[d][i] != atomic_load(&debug_oc[d])) i++;
+                atomic_store(&debug_oc[d], oc_choices[d][(i + n + delta) % n]);
+                switch_debug_save();
+                oc_maintain(1);
+            } else if (row == DBG_ROW_SCREENSHOT && (pressed & HidNpadButton_A)) {
                 atomic_store(&debug_screenshot, 1);
                 atomic_store(&debug_menu, 0);
                 debug_suppress_until_release = 1;
-            } else if (row == 9 && (pressed & HidNpadButton_A)) {
+            } else if (row == DBG_ROW_RECORD && (pressed & HidNpadButton_A)) {
                 atomic_store(&debug_recording, !atomic_load(&debug_recording));
                 atomic_store(&debug_menu, 0);
                 debug_suppress_until_release = 1;
-            } else if (row == 10) {
+            } else if (row == DBG_ROW_DRAW_START) {
                 if (pressed & HidNpadButton_ZL) delta = -1;
                 int amount = (pressed & (HidNpadButton_ZL | HidNpadButton_ZR))
                     ? 128 : atomic_load(&debug_draw_step);
                 int start = atomic_load(&debug_draw_start) + delta * amount;
                 if (start >= 0 && start <= 8192) atomic_store(&debug_draw_start, start);
-            } else if (row == 11) {
+            } else if (row == DBG_ROW_DRAW_STEP) {
                 atomic_store(&debug_draw_step, atomic_load(&debug_draw_step) == 8 ? 1 : 8);
-            } else if (row == 12 && (pressed & HidNpadButton_A)) {
+            } else if (row == DBG_ROW_DRAW_CAPTURE && (pressed & HidNpadButton_A)) {
                 atomic_store(&debug_draw_capture, 1);
                 atomic_store(&debug_menu, 0);
                 debug_suppress_until_release = 1;
-            } else if (row == 13 && (pressed & HidNpadButton_A)) {
+            } else if (row == DBG_ROW_REBOOT && (pressed & HidNpadButton_A)) {
                 atomic_store(&debug_reboot, 1);
-            } else if (row == 14 && (pressed & HidNpadButton_A)) {
+            } else if (row == DBG_ROW_CLOSE && (pressed & HidNpadButton_A)) {
                 atomic_store(&debug_menu, 0);
                 debug_suppress_until_release = 1;
             }

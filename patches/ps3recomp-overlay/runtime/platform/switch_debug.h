@@ -17,11 +17,27 @@ typedef struct SwitchDebugSettings {
     int gpu_aa;
     int show_fps_stats;
     int vsync;          /* 1: present on the display refresh, 0: present at once */
-    int frame_cap;      /* 60 or 30 frames per second at most */
+    int frame_cap;      /* 60 (drops to 30 when slow), 30, or 0 = off (30-60, never forced to 30) */
+    /* OVERCLOCK rows: chosen MHz (0 = system default) and the clock read back
+     * from the system about once a second. */
+    int oc_mhz[3];      /* CPU, GPU, RAM */
+    int oc_now_mhz[3];
 } SwitchDebugSettings;
+
+/* Debug menu rows (switch_input.c and the menu drawing share them). */
+enum {
+    DBG_ROW_SCALE, DBG_ROW_FXAA, DBG_ROW_VSYNC, DBG_ROW_CAP,
+    DBG_ROW_FPS, DBG_ROW_FRAME_MS, DBG_ROW_FPS_STATS, DBG_ROW_FPS_RESET,
+    DBG_ROW_OC_CPU, DBG_ROW_OC_GPU, DBG_ROW_OC_RAM,
+    DBG_ROW_SCREENSHOT, DBG_ROW_RECORD, DBG_ROW_DRAW_START, DBG_ROW_DRAW_STEP, DBG_ROW_DRAW_CAPTURE,
+    DBG_ROW_REBOOT, DBG_ROW_CLOSE,
+    DBG_ROW_COUNT
+};
 
 void switch_debug_init(void);
 SwitchDebugSettings switch_debug_snapshot(void);
+/* FRAME CAP row: 60, 30 or 0 (off). */
+int switch_debug_frame_cap(void);
 /* Returns nonzero when the controller belongs to the debug menu. */
 int switch_debug_input(uint64_t buttons);
 int switch_debug_take_reboot(void);
