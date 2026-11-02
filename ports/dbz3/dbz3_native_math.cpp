@@ -1297,3 +1297,59 @@ void func_0004A300(ppu_context* ctx) { dispatch(ctx, s_fn[14]); }
 void func_0004A118(ppu_context* ctx) { dispatch(ctx, s_fn[15]); }
 void func_0004E100(ppu_context* ctx) { dispatch(ctx, s_fn[16]); }
 void func_0004EE80(ppu_context* ctx) { dispatch(ctx, s_fn[17]); }
+
+/* ---- 0x002909C0: end-of-frame wait --------------------------------------------
+ * The title waits here for the flag at r3 + 0x2C, which its user-command
+ * handler raises once the RSX has passed the previous frame's user command.
+ * The lift polls with sys_timer_usleep(30), and that syscall never delivers
+ * pending GCM callbacks: the handler only ran when some other guest thread
+ * happened to make an HLE call. Here the loop delivers them itself
+ * (ppu_gcm_pump, as every HLE call does) before each sleep. Nothing is raised
+ * early: the callback is still queued by the FIFO walker when it reaches the
+ * command. SD switch usercmd-pump-off: the lifted loop.
+ *
+ * Counters for the pace log (dbz3_loop_prof.cpp), in system ticks: waits that
+ * found the flag down, the whole wait, the part before the FIFO queued the
+ * command ("fifo") and the part after it ("deliver"), and the longest wait. */
+extern "C" int g_t23_postfx_nowait;
+extern "C" volatile uint64_t g_gcm_user_queued_tick;   // cellGcmSys.c
+void func_002909C0_lifted(ppu_context* ctx);
+extern "C" uint64_t g_fw_waits, g_fw_wait_ticks, g_fw_fifo_ticks, g_fw_deliver_ticks,
+    g_fw_max_ticks;   // defined in dbz3_loop_prof.cpp
+static int s_fw_mode;   // 0 undecided, 1 delivering loop, -1 lifted
+
+void func_002909C0(ppu_context* ctx)
+{
+    if (g_t23_postfx_nowait) return;
+    if (__builtin_expect(!s_fw_mode, 0)) {
+        s_fw_mode = sd_flag("usercmd-pump-off") ? -1 : 1;
+        fprintf(stderr, "[native-A] frame wait 0x002909C0: %s\n",
+                s_fw_mode > 0 ? "delivers GCM callbacks" : "lifted (switched off)");
+    }
+    const uint32_t obj = (uint32_t)ctx->gpr[3];
+    uint32_t f = r32(obj + 0x2Cu);
+    if (f) { ctx->gpr[3] = f; return; }
+
+    const uint64_t t0 = armGetSystemTick();
+    if (s_fw_mode < 0) {
+        func_002909C0_lifted(ctx);
+    } else {
+        for (;;) {
+            if (ppu_gcm_pump) ppu_gcm_pump();
+            if ((f = r32(obj + 0x2Cu)) != 0) break;
+            ctx->gpr[11] = 0x8D;
+            ctx->gpr[3] = 0x1E;
+            lv2_syscall(ctx);
+            if ((f = r32(obj + 0x2Cu)) != 0) break;
+        }
+        ctx->gpr[3] = f;
+    }
+    const uint64_t t1 = armGetSystemTick();
+    const uint64_t q = __atomic_load_n(&g_gcm_user_queued_tick, __ATOMIC_RELAXED);
+    const uint64_t dt = t1 - t0;
+    g_fw_waits++;
+    g_fw_wait_ticks += dt;
+    if (dt > g_fw_max_ticks) g_fw_max_ticks = dt;
+    if (q > t0 && q <= t1) { g_fw_fifo_ticks += q - t0; g_fw_deliver_ticks += t1 - q; }
+    else g_fw_deliver_ticks += dt;   // queued before the wait began: all delivery
+}

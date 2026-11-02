@@ -94,6 +94,8 @@ void func_002A733C(ppu_context* ctx) __attribute__((weak));   /* defined in TU 0
 void func_002A733C_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_002A733CP11ppu_context")));
 void func_002993A0(ppu_context* ctx) __attribute__((weak));   /* defined in TU 004: memset */
 void func_002993A0_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_002993A0P11ppu_context")));
+void func_002909C0(ppu_context* ctx) __attribute__((weak));   /* defined in TU 004: end-of-frame wait */
+void func_002909C0_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_002909C0P11ppu_context")));
 #endif
 /* Native-A step 2c: mesh draw bodies (dbz3_native_mesh.cpp). */
 #ifdef DBZ3_NATIVE_MESH

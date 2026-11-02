@@ -58,6 +58,8 @@ extern "C" uint64_t g_dbz3_adx_sur_calls;   /* dbz3_audio_trace.cpp */
 
 /* Scheduler task running now, for the allocator trace (dbz3_heap_trace.cpp). */
 extern "C" { uint32_t g_dbz3_cur_task_fn = 0; int g_dbz3_cur_pass = 0; }
+/* End-of-frame wait counters, filled by 0x002909C0 (dbz3_native_math.cpp). */
+extern "C" { uint64_t g_fw_waits, g_fw_wait_ticks, g_fw_fifo_ticks, g_fw_deliver_ticks, g_fw_max_ticks; }
 #ifdef PORT_DBZ3_HEAP_TRACE
 extern "C" void dbz3_heap_trace_dump(FILE* f, uint32_t addr);
 #else
@@ -477,6 +479,13 @@ void pace_before_flip(void)
                 (double)g_pace_sleep_us / 150.0, (unsigned long long)g_pace_late,
                 g_pace_est_ema, (unsigned long long)g_pace_switches,
                 (unsigned long long)g_pace_tries, (unsigned long long)g_pace_kept);
+        /* End-of-frame wait 0x002909C0 (dbz3_native_math.cpp): ms per image
+         * in total, before the FIFO reached the user command, and after it. */
+        fprintf(g_log, "  fwait waits=%llu ms/frame=%.2f fifo=%.2f deliver=%.2f max_us=%llu\n",
+                (unsigned long long)g_fw_waits, (double)lp_us(g_fw_wait_ticks) / 150000.0,
+                (double)lp_us(g_fw_fifo_ticks) / 150000.0, (double)lp_us(g_fw_deliver_ticks) / 150000.0,
+                (unsigned long long)lp_us(g_fw_max_ticks));
+        g_fw_waits = g_fw_wait_ticks = g_fw_fifo_ticks = g_fw_deliver_ticks = g_fw_max_ticks = 0;
         g_pace_sleep_us = 0;
         g_pace_late = 0;
         g_pace_switches = 0;
