@@ -59,7 +59,7 @@ extern NWindow* nwindowGetDefault(void);
 
 #define DK_LOG_PATH      "sdmc:/switch/dbz-budokai-3-switch/t22-gpu.log"
 
-#define DK_NUM_SWAP      2
+#define DK_NUM_SWAP      3   /* triple buffering (run104: with 2, a late frame waited a whole refresh) */
 #define DK_IMAGE_POOL    (512u * 1024u * 1024u)  /* targets and textures      */
 #define DK_STAGING_SIZE  (8u * 1024u * 1024u)    /* upload / readback staging  */
 /* T41: one submit per frame. With 512 ops a DBZ3 battle frame (~1300 draws)

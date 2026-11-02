@@ -29,6 +29,57 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#if defined(__ARM_FEATURE_CRC32)
+#include <arm_acle.h>
+#endif
+
+/* Change detector on the ARMv8 CRC instructions (run106: XXH64 ran at
+ * ~0.6-1 GB/s on the Switch's A57, whose 64-bit multiplies are slow; it cost
+ * the renderer ~2.5 ms a frame over ~1.8 MB of vertex, index and texture
+ * bytes). Every 8-byte word goes into two chains with different polynomials
+ * (CRC32 and CRC32C), four chains in all so they run in parallel, and the
+ * chains are mixed into 64 bits with the length. Ephemeral fingerprints only:
+ * never persisted. */
+#if defined(__ARM_FEATURE_CRC32)
+#define RSX_HAVE_CRC_FINGERPRINT 1
+static inline uint64_t rsx_crc_fingerprint(const void* bytes, size_t size, uint64_t seed)
+{
+    const unsigned char* p = (const unsigned char*)bytes;
+    size_t left = size;
+    uint32_t a = (uint32_t)seed ^ 0x9E3779B9u, b = (uint32_t)(seed >> 32) ^ 0x85EBCA6Bu;
+    uint32_t c = ~a, d = ~b;
+    while (left >= 16) {
+        uint64_t w0, w1;
+        memcpy(&w0, p, 8);
+        memcpy(&w1, p + 8, 8);
+        a = __crc32cd(a, w0);
+        b = __crc32d(b, w0);
+        c = __crc32cd(c, w1);
+        d = __crc32d(d, w1);
+        p += 16;
+        left -= 16;
+    }
+    if (left >= 8) {
+        uint64_t w;
+        memcpy(&w, p, 8);
+        a = __crc32cd(a, w);
+        b = __crc32d(b, w);
+        p += 8;
+        left -= 8;
+    }
+    while (left--) {
+        c = __crc32cb(c, *p);
+        d = __crc32b(d, *p);
+        p++;
+    }
+    uint64_t h = ((uint64_t)a << 32 | b) ^ (((uint64_t)c << 32 | d) * UINT64_C(0x9E3779B185EBCA87));
+    h += (uint64_t)size * UINT64_C(0xC2B2AE3D27D4EB4F);
+    h ^= h >> 33;
+    h *= UINT64_C(0xFF51AFD7ED558CCD);
+    h ^= h >> 33;
+    return h;
+}
+#endif
 
 #define RSX_TH_P1 UINT64_C(11400714785074694791)
 #define RSX_TH_P2 UINT64_C(14029467366897019727)
@@ -73,6 +124,9 @@ static inline uint64_t rsx_th_round(uint64_t acc, uint64_t word)
  * chain. Every byte, including the tail, is still checked on every due frame. */
 static inline uint64_t rsx_texture_hash(const void* bytes, size_t size)
 {
+#if defined(RSX_HAVE_CRC_FINGERPRINT)
+    return rsx_crc_fingerprint(bytes, size, 0);
+#endif
     const unsigned char* p = (const unsigned char*)bytes;
     size_t left = size;
     uint64_t h;

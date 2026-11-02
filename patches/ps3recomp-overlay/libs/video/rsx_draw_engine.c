@@ -16,6 +16,9 @@
 #include "rsx_primitives.h"
 #include "rsx_restart_cuts.h"
 #include "rsx_texture_hash.h"
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 #include "rsx_vertex_formats.h"
 #include "rsx_vp_decompiler.h"
 
@@ -33,6 +36,23 @@ static inline u64 eng_tick(void) { u64 t; __asm__ volatile("mrs %0, cntpct_el0" 
 static u64 s_tex_hash_ticks, s_tex_hash_bytes, s_tex_hash_calls, s_tex_uploads;
 static u64 s_tex_lookup_ticks, s_tex_lookup_calls, s_tex_lookup_hits;
 static u64 s_tex_lookup_entries, s_tex_upload_ticks;
+/* Vertex fetch split (t23-draw-prof.log): cache key, index read, duplicate
+ * removal, fetch plan, decode, cache store; plus vertices really decoded. */
+static u64 s_fsub[6], s_fsub_verts;
+#define FSUB_T0() u64 _ft = eng_tick()
+#define FSUB(i) do { const u64 _n = eng_tick(); s_fsub[i] += _n - _ft; _ft = _n; } while (0)
+/* Cache key split: draw lists, index runs (+ element range), attribute
+ * descriptors, attribute source bytes; bytes hashed for index runs / spans. */
+static u64 s_ksub[4], s_kbytes[2];
+#define KSUB_T0() u64 _kt = eng_tick()
+#define KSUB(i) do { const u64 _n = eng_tick(); s_ksub[i] += _n - _kt; _kt = _n; } while (0)
+#define KBYTES(i, n) (s_kbytes[i] += (n))
+#else
+#define FSUB_T0() do { } while (0)
+#define FSUB(i) do { } while (0)
+#define KSUB_T0() do { } while (0)
+#define KSUB(i) do { } while (0)
+#define KBYTES(i, n) ((void)0)
 #endif
 
 /* Guest memory and the RSX offset resolvers, declared the way every backend
@@ -1175,6 +1195,21 @@ static void eng_textures_sweep(void)
  * cache full evicts the least recently used entry rather than returning
  * nothing: returning white "made the recovered orphanage render as flat
  * green/black geometry" (rsx_live_draw.c:2326-2334). */
+/* Lookup hint (run108: the linear scan over ~400 entries cost ~0.6 ms a
+ * frame): the index + 1 of the entry last found for a slot of the key. Only a
+ * hint -- the entry is matched field by field, and eviction moves entries --
+ * so a stale or colliding slot just falls back to the full scan. */
+#define ENG_TEX_HINT_SLOTS 2048u
+static u32 s_tex_hint[ENG_TEX_HINT_SLOTS];
+static inline u32 eng_tex_hint_slot(u32 location, u32 offset, u32 fmt, u32 w, u32 h)
+{
+    u32 x = offset * 0x9E3779B1u ^ (fmt << 7) ^ (w * 0x85EBCA6Bu) ^ (h << 13) ^ location;
+    x ^= x >> 15;
+    x *= 0x2C1B3C6Du;
+    x ^= x >> 12;
+    return x & (ENG_TEX_HINT_SLOTS - 1u);
+}
+
 static u32 eng_texture_slot(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
                             u32 levels, u32 pitch, int cube, u32 remap)
 {
@@ -1183,9 +1218,22 @@ static u32 eng_texture_slot(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
 #ifdef __SWITCH__
     const u64 lookup_t0 = eng_tick();
     s_tex_lookup_calls++;
-    s_tex_lookup_entries += g.n_textures;
 #endif
-    for (u32 i = 0; i < g.n_textures; i++) {
+    const u32 hint_slot = eng_tex_hint_slot(location, offset, fmt, w, h);
+    const u32 hint = s_tex_hint[hint_slot];
+    /* k == 0 tries the hinted entry, then the full scan skips it. */
+    for (u32 k = 0; k <= g.n_textures; k++) {
+        u32 i;
+        if (k == 0) {
+            if (!hint || hint - 1u >= g.n_textures) continue;
+            i = hint - 1u;
+        } else {
+            i = k - 1u;
+            if (i == hint - 1u) continue;
+        }
+#ifdef __SWITCH__
+        s_tex_lookup_entries++;
+#endif
         eng_texture* e = &g.textures[i];
         if (e->location != location || e->offset != offset ||
             e->format != fmt || e->width != w || e->height != h ||
@@ -1193,6 +1241,7 @@ static u32 eng_texture_slot(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
             e->pitch != pitch || e->remap != remap ||
             e->cubemap != (u32)(cube != 0))
             continue;
+        s_tex_hint[hint_slot] = i + 1u;
 #ifdef __SWITCH__
         s_tex_lookup_ticks += eng_tick() - lookup_t0;
         s_tex_lookup_hits++;
@@ -1263,7 +1312,10 @@ static u32 eng_texture_slot(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
                                        cube, remap, NULL);
     /* Kept even when the upload failed (handle 0), as before: the entry is
      * re-tried by the next content change rather than on every use. */
-    if (g.n_textures < ENG_MAX_TEXTURES) g.textures[g.n_textures++] = e;
+    if (g.n_textures < ENG_MAX_TEXTURES) {
+        g.textures[g.n_textures++] = e;
+        s_tex_hint[hint_slot] = g.n_textures;
+    }
     return e.handle;
 }
 
@@ -1908,6 +1960,7 @@ static int dc_reserve_indices(u32 count)
  * rsx_live_draw.c's fetch_batches_hoisted (4165-4292). */
 static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
 {
+    FSUB_T0();
     for (u32 b = 0; b < dc.n_arr && dc.fetch_ok; b++)
         for (u32 i = 0; i < dc.arr[b].count && dc.fetch_ok; i++)
             if (!dc_push_ref(dc.arr[b].first + i, 0)) dc.fetch_ok = 0;
@@ -1948,6 +2001,7 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
             }
         }
     }
+    FSUB(1);
     if (!dc.fetch_ok) return;
 
     dc.n_source_refs = dc.n_refs;
@@ -1961,6 +2015,7 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
             dc.n_refs = unique;
         }
     }
+    FSUB(2);
 
     dc.layout = *layout;
     rsx_vertex_fetch_plan_init(&dc.fetch_plan, &g.rsx, layout, eng_guest_ptr, NULL);
@@ -1970,6 +2025,7 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
         dc.fetch_ok = 0;
         return;
     }
+    FSUB(3);
     for (u32 i = 0; i < dc.n_refs; i++) {
         u8* dst = layout->stride ? dc.verts + (u64)i * layout->stride : NULL;
         if (!rsx_vertex_fetch_one(&dc.fetch_plan, &dc.refs[i], dst)) {
@@ -1978,6 +2034,10 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
         }
     }
     dc.n_verts = dc.n_refs;
+    FSUB(4);
+#ifdef __SWITCH__
+    s_fsub_verts += dc.n_refs;
+#endif
 }
 
 /* ---- T34: per-draw vertex fetch cache -------------------------------------
@@ -2008,9 +2068,13 @@ static inline u64 eh_round(u64 acc, u64 in)
     acc += in * EH_P2;
     return eh_rotl(acc, 31) * EH_P1;
 }
-/* XXH64-style: four independent lanes, 32 bytes a step. */
+/* XXH64-style: four independent lanes, 32 bytes a step. On the Switch the
+ * CRC fingerprint (rsx_texture_hash.h) is used instead. */
 static u64 eng_hash_bytes(const void* data, u64 n, u64 seed)
 {
+#if defined(RSX_HAVE_CRC_FINGERPRINT)
+    return rsx_crc_fingerprint(data, (size_t)n, seed);
+#endif
     const u8* p = (const u8*)data;
     u64 h;
     if (n >= 32) {
@@ -2073,10 +2137,79 @@ static void eng_vc_free(eng_vc_entry* e)
     memset(e, 0, sizeof(*e));
 }
 
+/* Element range of one index run: the min and max of (index + base) & 0xFFFFF
+ * over the indices that are not the restart value (run108: the byte-wise loop
+ * cost ~0.5 ms a frame over ~47000 indices). Raw min/max first, eight 16-bit
+ * indices a step on NEON; when adding the base could wrap the 20-bit element
+ * index, the exact per-index loop runs instead. */
+static void eng_index_range(const u8* run, u32 count, int is_u32, int restart_en,
+                            u32 restart_val, u32 base_idx, u32* emin, u32* emax)
+{
+    u32 lo = 0xFFFFFFFFu, hi = 0;
+    int any = 0;
+    u32 i = 0;
+    if (!is_u32) {
+#if defined(__aarch64__)
+        const int rs = restart_en && restart_val <= 0xFFFFu;
+        const uint16x8_t rv = vdupq_n_u16((u16)restart_val);
+        uint16x8_t vlo = vdupq_n_u16(0xFFFFu), vhi = vdupq_n_u16(0);
+        uint16x8_t vany = vdupq_n_u16(0);
+        for (; i + 8u <= count; i += 8u) {
+            const uint16x8_t v = vreinterpretq_u16_u8(vrev16q_u8(vld1q_u8(run + (size_t)i * 2u)));
+            const uint16x8_t ok = rs ? vmvnq_u16(vceqq_u16(v, rv)) : vdupq_n_u16(0xFFFFu);
+            vlo = vminq_u16(vlo, vbslq_u16(ok, v, vdupq_n_u16(0xFFFFu)));
+            vhi = vmaxq_u16(vhi, vandq_u16(ok, v));
+            vany = vorrq_u16(vany, ok);
+        }
+        if (vmaxvq_u16(vany)) {
+            any = 1;
+            lo = vminvq_u16(vlo);
+            hi = vmaxvq_u16(vhi);
+        }
+#endif
+        for (; i < count; i++) {
+            const u8* p = run + (size_t)i * 2u;
+            const u32 index = (u32)((p[0] << 8) | p[1]);
+            if (restart_en && index == restart_val) continue;
+            any = 1;
+            if (index < lo) lo = index;
+            if (index > hi) hi = index;
+        }
+    } else {
+        for (; i < count; i++) {
+            u32 w;
+            memcpy(&w, run + (size_t)i * 4u, 4);
+            const u32 index = __builtin_bswap32(w);
+            if (restart_en && index == restart_val) continue;
+            any = 1;
+            if (index < lo) lo = index;
+            if (index > hi) hi = index;
+        }
+    }
+    if (!any) return;
+    if ((u64)hi + base_idx <= 0x000FFFFFull) {
+        if (lo + base_idx < *emin) *emin = lo + base_idx;
+        if (hi + base_idx > *emax) *emax = hi + base_idx;
+        return;
+    }
+    const u32 esz = is_u32 ? 4u : 2u;
+    for (i = 0; i < count; i++) {
+        const u8* p = run + (size_t)i * esz;
+        const u32 index = is_u32
+            ? (((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3])
+            : (u32)((p[0] << 8) | p[1]);
+        if (restart_en && index == restart_val) continue;
+        const u32 e = (index + base_idx) & 0x000FFFFFu;
+        if (e < *emin) *emin = e;
+        if (e > *emax) *emax = e;
+    }
+}
+
 /* Key of the current draw group, or 0 when it must not be cached. */
 static u64 eng_vc_key(const rsx_vertex_layout_plan* layout, int allow_remap)
 {
     if (dc.inl || !layout->count) return 0;
+    KSUB_T0();
     struct {
         u32 mask, stride, count, allow, base_off, base_idx, divider, n_arr, n_idx;
     } hdr;
@@ -2100,6 +2233,7 @@ static u64 eng_vc_key(const rsx_vertex_layout_plan* layout, int allow_remap)
         if (first < emin) emin = first;
         if (last > emax) emax = last;
     }
+    KSUB(0);
     if (dc.n_idx) {
         rsx_dsp_index_array ia;
         rsx_dsp_get_index_array(&g.rsx, &ia);
@@ -2120,18 +2254,12 @@ static u64 eng_vc_key(const rsx_vertex_layout_plan* layout, int allow_remap)
             if (!run) return 0;
             h = eng_hash_bytes(run, bytes, h);
             s_vc_hashed += bytes;
-            for (u32 i = 0; i < count; i++) {
-                const u8* p = run + (size_t)i * esz;
-                const u32 index = ia.is_u32
-                    ? (((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3])
-                    : (u32)((p[0] << 8) | p[1]);
-                if (restart_en && index == restart_val) continue;
-                const u32 e = (index + hdr.base_idx) & 0x000FFFFFu;
-                if (e < emin) emin = e;
-                if (e > emax) emax = e;
-            }
+            KBYTES(0, bytes);
+            eng_index_range(run, count, ia.is_u32, restart_en, restart_val, hdr.base_idx,
+                            &emin, &emax);
         }
     }
+    KSUB(1);
     if (emin > emax) return 0;
 
     /* Interleaved attributes often cover nearly the same guest bytes. Keep
@@ -2174,6 +2302,7 @@ static u64 eng_vc_key(const rsx_vertex_layout_plan* layout, int allow_remap)
         }
         spans[j] = span;
     }
+    KSUB(2);
     for (u32 i = 0; i < n_spans;) {
         u64 end = spans[i].end;
         u32 j = i + 1;
@@ -2190,6 +2319,7 @@ static u64 eng_vc_key(const rsx_vertex_layout_plan* layout, int allow_remap)
         if (src) {
             h = eng_hash_bytes(src, end - spans[i].start, h);
             s_vc_hashed += end - spans[i].start;
+            KBYTES(1, end - spans[i].start);
         } else {
             for (u32 k = i; k < j; k++) {
                 const u64 bytes = spans[k].end - spans[k].start;
@@ -2198,10 +2328,12 @@ static u64 eng_vc_key(const rsx_vertex_layout_plan* layout, int allow_remap)
                 if (!src) return 0;
                 h = eng_hash_bytes(src, bytes, h);
                 s_vc_hashed += bytes;
+                KBYTES(1, bytes);
             }
         }
         i = j;
     }
+    KSUB(3);
     return h ? h : 1u;
 }
 
@@ -2273,7 +2405,9 @@ static void dc_fetch_cached(const rsx_vertex_layout_plan* layout, int allow_rema
 {
     if (s_vc_enabled < 0) s_vc_enabled = getenv("RSX_NO_VCACHE") ? 0 : 1;
     s_vc_tick++;
+    FSUB_T0();
     const u64 key = s_vc_enabled ? eng_vc_key(layout, allow_remap) : 0;
+    FSUB(0);
     if (key) {
         eng_vc_entry* e = eng_vc_find(key);
         if (e) {
@@ -2297,11 +2431,15 @@ static void dc_fetch_cached(const rsx_vertex_layout_plan* layout, int allow_rema
     dc_set_own_views();
     if (!key || !dc.fetch_ok) return;
     s_vc_misses++;
+#ifdef __SWITCH__
+    _ft = eng_tick();
+#endif
     /* Store on the second sighting: a key that never repeats is not worth a
      * copy. */
     u64* seen = &s_vc_probation[(u32)(key ^ (key >> 29)) & (ENG_VC_PROBATION - 1u)];
     if (*seen == key) eng_vc_store(key);
     else *seen = key;
+    FSUB(5);
 }
 
 /* ---- sink ---------------------------------------------------------------- */
@@ -2923,6 +3061,21 @@ static void eng_draw_prof_window(void)
                 (unsigned long long)s_vc_hits, (unsigned long long)s_vc_misses,
                 (unsigned long long)s_vc_stores, (unsigned long long)s_vc_uncacheable,
                 (unsigned long long)(s_vc_hashed >> 10), (unsigned long long)(s_vc_bytes >> 20));
+        fprintf(f, "  fetch_split key_ms=%llu refs_ms=%llu remap_ms=%llu prepare_ms=%llu"
+                " decode_ms=%llu store_ms=%llu decoded_verts=%llu\n",
+                (unsigned long long)(s_fsub[0] / 19200ull), (unsigned long long)(s_fsub[1] / 19200ull),
+                (unsigned long long)(s_fsub[2] / 19200ull), (unsigned long long)(s_fsub[3] / 19200ull),
+                (unsigned long long)(s_fsub[4] / 19200ull), (unsigned long long)(s_fsub[5] / 19200ull),
+                (unsigned long long)s_fsub_verts);
+        memset(s_fsub, 0, sizeof s_fsub);
+        s_fsub_verts = 0;
+        fprintf(f, "  key_split lists_ms=%llu index_ms=%llu attrs_ms=%llu spans_ms=%llu"
+                " index_kb=%llu span_kb=%llu\n",
+                (unsigned long long)(s_ksub[0] / 19200ull), (unsigned long long)(s_ksub[1] / 19200ull),
+                (unsigned long long)(s_ksub[2] / 19200ull), (unsigned long long)(s_ksub[3] / 19200ull),
+                (unsigned long long)(s_kbytes[0] >> 10), (unsigned long long)(s_kbytes[1] >> 10));
+        memset(s_ksub, 0, sizeof s_ksub);
+        memset(s_kbytes, 0, sizeof s_kbytes);
         s_vc_hits = s_vc_misses = s_vc_stores = s_vc_uncacheable = s_vc_hashed = 0;
         fflush(f);
     }

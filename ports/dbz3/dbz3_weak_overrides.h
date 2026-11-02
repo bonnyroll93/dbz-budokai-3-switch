@@ -72,6 +72,18 @@ void func_000357A0(ppu_context* ctx) __attribute__((weak));   /* defined in TU 0
 void func_000357A0_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_000357A0P11ppu_context")));
 void func_00024F58(ppu_context* ctx) __attribute__((weak));   /* defined in TU 000 */
 void func_00024F58_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_00024F58P11ppu_context")));
+void func_0004A39C(ppu_context* ctx) __attribute__((weak));   /* defined in TU 000 */
+void func_0004A39C_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_0004A39CP11ppu_context")));
+void func_0004A428(ppu_context* ctx) __attribute__((weak));   /* defined in TU 000 */
+void func_0004A428_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_0004A428P11ppu_context")));
+void func_0004A300(ppu_context* ctx) __attribute__((weak));   /* defined in TU 000 */
+void func_0004A300_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_0004A300P11ppu_context")));
+void func_0004A118(ppu_context* ctx) __attribute__((weak));   /* defined in TU 000 */
+void func_0004A118_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_0004A118P11ppu_context")));
+void func_0004E100(ppu_context* ctx) __attribute__((weak));   /* defined in TU 000 */
+void func_0004E100_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_0004E100P11ppu_context")));
+void func_0004EE80(ppu_context* ctx) __attribute__((weak));   /* defined in TU 000 */
+void func_0004EE80_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_0004EE80P11ppu_context")));
 #endif
 #ifdef DBZ3_NATIVE_MATH_TU005
 void func_002B6E00(ppu_context* ctx) __attribute__((weak));   /* defined in TU 005: cellGcmAddressToOffset stub */

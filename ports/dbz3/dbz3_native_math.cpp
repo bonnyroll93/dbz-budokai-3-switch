@@ -30,6 +30,11 @@
  *   -planes-off, -euler-off, -memset-off: the small helpers 0x0001EEF8,
  *                      0x0001F164, 0x0001EF6C, 0x000297B8, 0x000299AC,
  *                      0x000357A0, 0x00024F58, 0x002993A0 (memset)
+ *   native-put4-off, -put2f-off, -put12-off, -vcall3-off, -transpose-off,
+ *   -vcall-a2o-off: draw-state writers 0x0004A39C, 0x0004A428, 0x0004A300,
+ *                      0x0004A118,
+ *                      0x0004E100, 0x0004EE80 (the last three call other
+ *                      guest code and are not checked by native-verify)
  *   native-verify      run the lifted function first, then the native one
  *                      from the same state, compare the results (f1, the
  *                      64 bytes at 0x0047A300, the 16 bytes at r3, or r3 and
@@ -62,6 +67,14 @@ void func_000299AC_lifted(ppu_context* ctx);
 void func_000357A0_lifted(ppu_context* ctx);
 void func_00024F58_lifted(ppu_context* ctx);
 void func_002993A0_lifted(ppu_context* ctx);
+void func_0004A39C_lifted(ppu_context* ctx);
+void func_0004A428_lifted(ppu_context* ctx);
+void func_0004A300_lifted(ppu_context* ctx);
+void func_0004A118_lifted(ppu_context* ctx);
+void func_0004E100_lifted(ppu_context* ctx);
+void func_0004EE80_lifted(ppu_context* ctx);
+void func_00292628(ppu_context* ctx);   // memmove, native in dbz3_ppu_native.cpp
+void func_002B6E00(ppu_context* ctx);
 /* The lift's fast-memory switch and SPU reservation watch (as dbz3_liftfast.h). */
 extern "C" {
 extern const int nm_fast_vm __asm__("g_ppu_fast_vm");
@@ -780,6 +793,209 @@ bool memset_native(ppu_context* c)
     return true;
 }
 
+/* ---- step 3: draw-state writers --------------------------------------------
+ * A state object (r3) keeps flags at +0x20, a byte counter at +0x1C, a draw
+ * counter at +0x18 and its command list at +0x4. 0x0004D1A8 picks the list's
+ * current entry (list + 0x28 + 12 * index); the entry's word at +8 is the write
+ * cursor. Stack bytes below the caller's r1 (register saves) are not written,
+ * except the frames the virtual calls run under. */
+inline uint8_t r8u(uint64_t a) { return vm_base[(uint32_t)a]; }
+inline void w8(uint64_t ea, uint32_t v)
+{
+    const uint32_t a = (uint32_t)ea;
+    dbz3_store_hook(a, 1u);
+    vm_base[a] = (uint8_t)v;
+}
+inline uint64_t gcm_entry(uint64_t list)          // 0x0004D1A8
+{
+    const uint64_t idx = r32((uint32_t)list + 0x10u);
+    return (list + idx * 12u + 0x28u) & 0xFFFFFFFFull;
+}
+
+/* 0x0004A39C: 4 bytes from r4 into the list, flag 0x10, counter + 4. */
+bool put4_native(ppu_context* c)
+{
+    const uint64_t obj = c->gpr[3], src = c->gpr[4];
+    uint64_t r5 = r32((uint32_t)obj + 0x20u);
+    const uint64_t list = r32((uint32_t)obj + 0x4u);
+    if (!(r5 & 0x10u)) {
+        const uint64_t r6 = r8u(obj + 0x1C);
+        r5 |= 0x10u;
+        w32(obj + 0x20, (uint32_t)r5);
+        w8(obj + 0x1C, (uint32_t)(r6 + 4u));
+    }
+    const uint64_t e = gcm_entry(list);
+    const uint64_t p = r32((uint32_t)e + 8u);
+    const uint8_t b0 = r8u(src + 0), b1 = r8u(src + 1), b2 = r8u(src + 2), b3 = r8u(src + 3);
+    w8(p + 0, b0); w8(p + 1, b1); w8(p + 2, b2); w8(p + 3, b3);
+    w32(e + 8, (uint32_t)(r32((uint32_t)e + 8u) + 4u));
+    c->gpr[3] = e;
+    return true;
+}
+
+/* 0x0004A428: the single-precision bits of f1 and f2 into the list, flag 0x20,
+ * counter + 8. */
+bool put2f_native(ppu_context* c)
+{
+    const uint64_t obj = c->gpr[3];
+    const float x = (float)c->fpr[1], y = (float)c->fpr[2];
+    uint32_t xb, yb; memcpy(&xb, &x, 4); memcpy(&yb, &y, 4);
+    uint64_t r5 = r32((uint32_t)obj + 0x20u);
+    const uint64_t list = r32((uint32_t)obj + 0x4u);
+    if (!(r5 & 0x20u)) {
+        const uint64_t r6 = r8u(obj + 0x1C);
+        r5 |= 0x20u;
+        w32(obj + 0x20, (uint32_t)r5);
+        w8(obj + 0x1C, (uint32_t)(r6 + 8u));
+    }
+    const uint64_t e = gcm_entry(list);
+    const uint64_t p = r32((uint32_t)e + 8u);
+    w8(p + 0, xb >> 24); w8(p + 1, xb >> 16); w8(p + 2, xb >> 8); w8(p + 3, xb);
+    w8(p + 4, yb >> 24); w8(p + 5, yb >> 16); w8(p + 6, yb >> 8); w8(p + 7, yb);
+    w32(e + 8, (uint32_t)(r32((uint32_t)e + 8u) + 8u));
+    c->gpr[3] = e;
+    return true;
+}
+
+/* 0x0004A300: 12 bytes from r4 into the list (through the title's memcpy),
+ * flag 0x1, counter + 12, draw counter + 1. */
+bool put12_native(ppu_context* c)
+{
+    const uint64_t obj = c->gpr[3], src = c->gpr[4], lr = c->lr;
+    uint64_t r4 = r32((uint32_t)obj + 0x20u);
+    const uint64_t list = r32((uint32_t)obj + 0x4u);
+    if (!(r4 & 0x1u)) {
+        r4 |= 0x1u;
+        const uint64_t r5 = r8u(obj + 0x1C);
+        w32(obj + 0x20, (uint32_t)r4);
+        w8(obj + 0x1C, (uint32_t)(r5 + 0xCu));
+    }
+    const uint64_t e = gcm_entry(list);
+    c->gpr[3] = r32((uint32_t)e + 8u);
+    c->gpr[4] = src;
+    c->gpr[5] = 0xC;
+    c->lr = 0x0004A364u;
+    func_00292628(c); DRAIN_TRAMPOLINE(c);
+    w32(e + 8, (uint32_t)(r32((uint32_t)e + 8u) + 0xCu));
+    const uint64_t n = (uint64_t)r32((uint32_t)obj + 0x18u) + 1u;
+    w32(obj + 0x18, (uint32_t)n);
+    c->gpr[3] = n;
+    c->lr = lr;
+    return true;
+}
+
+/* Guest frame for natives that call other guest code: back chain at the new
+ * r1, LR at old r1 + 0x10, as the lift's prologue. */
+struct GuestFrame {
+    ppu_context* c; uint64_t size, lr;
+    GuestFrame(ppu_context* ctx, uint64_t sz) : c(ctx), size(sz), lr(ctx->lr)
+    {
+        w64(c->gpr[1] - size, c->gpr[1]);
+        c->gpr[1] -= size;
+        w64(c->gpr[1] + size + 0x10, lr);
+    }
+    ~GuestFrame() { c->gpr[1] += size; c->lr = lr; }
+};
+/* bctrl through the function descriptor at opd, TOC saved at 0x28(r1). */
+inline void call_opd(ppu_context* c, uint64_t opd, int code_reg)
+{
+    w64(c->gpr[1] + 0x28, c->gpr[2]);
+    const uint64_t code = r32((uint32_t)opd);
+    c->gpr[code_reg] = code;
+    c->gpr[2] = r32((uint32_t)opd + 4u);
+    c->ctr = (uint32_t)code;
+    ps3_indirect_call(c); DRAIN_TRAMPOLINE(c);
+    c->gpr[2] = r64((uint32_t)c->gpr[1] + 0x28u);
+}
+
+/* 0x0004A118: obj->vt[0x24](obj, r4), vt[0x28](obj, r5), vt[0x2C](obj, f1, f2). */
+bool vcall3_native(ppu_context* c)
+{
+    const uint64_t obj = c->gpr[3], a5 = c->gpr[5];
+    const double x = c->fpr[1], y = c->fpr[2];
+    GuestFrame fr(c, 0x90);
+    uint64_t opd = r32(r32((uint32_t)obj) + 0x24u);
+    c->gpr[5] = opd;
+    call_opd(c, opd, 6);
+    c->gpr[4] = a5;
+    c->gpr[3] = obj;
+    opd = r32(r32((uint32_t)obj) + 0x28u);
+    c->gpr[5] = opd;
+    call_opd(c, opd, 6);
+    c->gpr[3] = obj;
+    c->fpr[1] = x;
+    c->fpr[2] = y;
+    opd = r32(r32((uint32_t)obj) + 0x2Cu);
+    c->gpr[4] = opd;
+    call_opd(c, opd, 5);
+    return true;
+}
+
+/* 0x0004E100: transpose the 4x4 matrix at r4 into obj + 0x190 and pass it on
+ * with obj->vt[0xAC](obj, 8, 0x10, obj + 0x190). Word moves on the guest's
+ * bytes, as the lift's vmrghw/vmrglw. */
+bool transpose_native(ppu_context* c)
+{
+    const uint64_t obj = c->gpr[3], m = c->gpr[4];
+    uint32_t A[4], B[4], C[4], D[4];
+    memcpy(A, vm_base + (uint32_t)(m & ~0xFull), 16);
+    memcpy(B, vm_base + (uint32_t)(((m + 0x20) & 0xFFFFFFFFull) & ~0xFull), 16);
+    memcpy(C, vm_base + (uint32_t)(((m + 0x10) & 0xFFFFFFFFull) & ~0xFull), 16);
+    memcpy(D, vm_base + (uint32_t)(((m + 0x30) & 0xFFFFFFFFull) & ~0xFull), 16);
+    const uint32_t c0[4] = { A[0], C[0], B[0], D[0] }, c1[4] = { A[1], C[1], B[1], D[1] };
+    const uint32_t c2[4] = { A[2], C[2], B[2], D[2] }, c3[4] = { A[3], C[3], B[3], D[3] };
+    auto st = [&](uint64_t ea, const uint32_t* v) {
+        const uint32_t a = (uint32_t)(ea & ~0xFull);
+        dbz3_store_hook(a, 16u);
+        memcpy(vm_base + a, v, 16);
+    };
+    st(obj + 0x190, c0);
+    st(obj + 0x1A0, c1);
+    st(obj + 0x1B0, c2);
+    st(obj + 0x1C0, c3);
+    GuestFrame fr(c, 0x70);
+    c->gpr[6] = (obj + 0x190) & 0xFFFFFFFFull;
+    c->gpr[4] = 8;
+    c->gpr[5] = 0x10;
+    c->gpr[3] = obj;
+    const uint64_t opd = r32(r32((uint32_t)obj) + 0xACu);
+    c->gpr[7] = opd;
+    call_opd(c, opd, 8);
+    return true;
+}
+
+/* 0x0004EE80: if r5: offset = cellGcmAddressToOffset(r6), then
+ * obj->vt[0x64](obj, offset, r7, r8) and obj->vt[0x6C](obj, r4, r5). */
+bool vcall_a2o_native(ppu_context* c)
+{
+    const uint64_t obj = c->gpr[3], a4 = c->gpr[4], a5 = c->gpr[5];
+    const uint64_t a6 = c->gpr[6], a7 = c->gpr[7], a8 = c->gpr[8];
+    GuestFrame fr(c, 0xA0);
+    if ((int32_t)a5 == 0) return true;
+    const uint64_t slot = c->gpr[1] + 0x70;
+    w32(slot, 0);
+    c->gpr[5] = 0;
+    c->gpr[4] = slot;
+    c->gpr[3] = a6;
+    c->lr = 0x0004EED0u;
+    func_002B6E00(c); DRAIN_TRAMPOLINE(c);
+    c->gpr[2] = r64((uint32_t)c->gpr[1] + 0x28u);
+    c->gpr[3] = obj;
+    c->gpr[4] = r32((uint32_t)slot);
+    c->gpr[5] = a7;
+    c->gpr[6] = a8;
+    uint64_t opd = r32(r32((uint32_t)obj) + 0x64u);
+    c->gpr[7] = opd;
+    call_opd(c, opd, 8);
+    c->gpr[3] = obj;
+    c->gpr[4] = a4;
+    c->gpr[5] = a5;
+    opd = r32(r32((uint32_t)obj) + 0x6Cu);
+    c->gpr[6] = opd;
+    call_opd(c, opd, 7);
+    return true;
+}
+
 /* ---- dispatch and verification --------------------------------------------- */
 uint64_t guest_hash(uint32_t ea)
 {
@@ -803,7 +1019,9 @@ bool sd_flag(const char* name)
 typedef bool (*NativeFn)(ppu_context*);
 typedef void (*LiftedFn)(ppu_context*);
 struct Stats { uint64_t calls, verified, mismatch, lifted; };
-enum Result { kF1, kGlobalMatrix, kOut16, kA2O, kR3, kMemset };   // what verify compares
+enum Result { kF1, kGlobalMatrix, kOut16, kA2O, kR3, kMemset, kList, kNone };   // what verify compares
+/* kList: the state object's counters, the list cursor and the bytes written
+ * (put*); kNone: calls other guest code, so it cannot run twice: native only. */
 struct Entry {
     const char* name; const char* off_flag; NativeFn native; LiftedFn lifted;
     Result result;
@@ -811,7 +1029,7 @@ struct Entry {
     int mode;                        // 0 undecided, -1 lifted, 1 native, 2 native + verify
     Stats st;
 };
-Entry s_fn[12] = {
+Entry s_fn[18] = {
     { "sincos 0x002A733C", "native-sincos-off", sincos_native, func_002A733C_lifted, kF1,
       { 0x002A733Cu, 0x002A6EB4u }, { 0x898D1DFC4B4A86C9ull, 0x78F3A78B7569B3CFull }, 0, {} },
     { "matrix 0x000252B0", "native-matrix-off", matrix_native, func_000252B0_lifted, kGlobalMatrix,
@@ -842,6 +1060,24 @@ Entry s_fn[12] = {
     { "memset 0x002993A0", "native-memset-off", memset_native, func_002993A0_lifted, kMemset,
       { 0x002993A0u, 0x002993C0u, 0x002993E0u, 0x00299400u },
       { 0x56097ED3056F6419ull, 0xA775869AC9B7D6B8ull, 0x96220E7BD226D798ull, 0xA94501583F0A1DAFull }, 0, {} },
+    { "put4 0x0004A39C", "native-put4-off", put4_native, func_0004A39C_lifted, kList,
+      { 0x0004A39Cu, 0x0004A3BCu, 0x0004D1A8u },
+      { 0xA7396DFD6B6199A2ull, 0x8EBB24F8C1F9BB80ull, 0x0969DB452A789228ull }, 0, {} },
+    { "put2f 0x0004A428", "native-put2f-off", put2f_native, func_0004A428_lifted, kList,
+      { 0x0004A428u, 0x0004A448u, 0x0004A468u, 0x0004D1A8u },
+      { 0x6EB69FAB7BA542BEull, 0x169B6330CECCA678ull, 0xDF9C9983A2FB73DEull, 0x0969DB452A789228ull }, 0, {} },
+    { "put12 0x0004A300", "native-put12-off", put12_native, func_0004A300_lifted, kList,
+      { 0x0004A300u, 0x0004A320u, 0x0004A340u, 0x0004D1A8u },
+      { 0x0D83B46B9FA09784ull, 0xF95EE8E684BE8F4Bull, 0x6A3D7BC6FA3FF0DEull, 0x0969DB452A789228ull }, 0, {} },
+    { "vcall3 0x0004A118", "native-vcall3-off", vcall3_native, func_0004A118_lifted, kNone,
+      { 0x0004A118u, 0x0004A138u, 0x0004A158u },
+      { 0x350FF8A6576A8B04ull, 0x0456CB6939FB1876ull, 0x31BED2ECC4DA1B8Bull }, 0, {} },
+    { "transpose 0x0004E100", "native-transpose-off", transpose_native, func_0004E100_lifted, kNone,
+      { 0x0004E100u, 0x0004E120u, 0x0004E140u },
+      { 0x808B3E1CDD5E4C40ull, 0xF508F3B46F400454ull, 0x52BC41A7145C651Dull }, 0, {} },
+    { "vcall-a2o 0x0004EE80", "native-vcall-a2o-off", vcall_a2o_native, func_0004EE80_lifted, kNone,
+      { 0x0004EE80u, 0x0004EEA0u, 0x0004EEC0u },
+      { 0x87F120F87D1B2AB7ull, 0x09061E51AE76FED6ull, 0x08595D12BEB9BF64ull }, 0, {} },
 };
 const uint32_t kMatrix = 0x0047A300u;
 
@@ -924,8 +1160,54 @@ void result_region(const Entry& e, const Regs& r, uint32_t& addr, uint32_t& len)
     }
 }
 
+/* kList: obj + 0x18..0x23, the cursor word, and the 4/8/12 bytes at the cursor. */
+void verify_list(ppu_context* c, Entry& e)
+{
+    const uint64_t obj = c->gpr[3];
+    const uint32_t n = e.native == put4_native ? 4u : e.native == put2f_native ? 8u : 12u;
+    const uint64_t ent = gcm_entry(r32((uint32_t)obj + 0x4u));
+    const uint32_t cur = r32((uint32_t)ent + 8u);
+    const uint32_t ra[3] = { (uint32_t)obj + 0x18u, (uint32_t)ent + 8u, cur };
+    const uint32_t rn[3] = { 12u, 4u, n };
+    for (int i = 0; i < 3; i++)
+        if (ra[i] < 0x10000u || ra[i] >= 0xE0000000u) { e.st.lifted++; e.lifted(c); return; }
+    uint8_t pre[3][16], a[3][16];
+    for (int i = 0; i < 3; i++) memcpy(pre[i], vm_base + ra[i], rn[i]);
+    Regs before; save_regs(c, before);
+    e.lifted(c);
+    Regs after; save_regs(c, after);
+    for (int i = 0; i < 3; i++) memcpy(a[i], vm_base + ra[i], rn[i]);
+    for (int i = 0; i < 3; i++) memcpy(vm_base + ra[i], pre[i], rn[i]);
+    load_regs(c, before);
+    if (!e.native(c)) {
+        e.st.lifted++;
+        load_regs(c, after);
+        for (int i = 0; i < 3; i++) memcpy(vm_base + ra[i], a[i], rn[i]);
+        return;
+    }
+    e.st.verified++;
+    bool same = after.gpr[3] == c->gpr[3] && after.gpr[1] == c->gpr[1] && after.lr == c->lr;
+    for (int i = 0; i < 3; i++) same = same && !memcmp(a[i], vm_base + ra[i], rn[i]);
+    if (same) return;
+    e.st.mismatch++;
+    if (s_logged < 60) {
+        s_logged++;
+        log_line("MISMATCH %s obj=0x%08X cursor=0x%08X lifted r3=0x%08X native r3=0x%08X\n", e.name,
+                 (uint32_t)obj, cur, (uint32_t)after.gpr[3], (uint32_t)c->gpr[3]);
+        for (int i = 0; i < 3; i++)
+            for (uint32_t o = 0; o < rn[i]; o++)
+                if (a[i][o] != vm_base[ra[i] + o])
+                    log_line("  mem 0x%08X lifted=%02X native=%02X\n", ra[i] + o, a[i][o],
+                             vm_base[ra[i] + o]);
+    }
+    load_regs(c, after);
+    for (int i = 0; i < 3; i++) memcpy(vm_base + ra[i], a[i], rn[i]);
+}
+
 void verify_call(ppu_context* c, Entry& e)
 {
+    if (e.result == kList) { verify_list(c, e); return; }
+    if (e.result == kNone) { e.st.verified++; if (!e.native(c)) e.lifted(c); return; }
     Regs before; save_regs(c, before);
     uint32_t addr, len;
     result_region(e, before, addr, len);
@@ -1009,3 +1291,9 @@ void func_000299AC(ppu_context* ctx) { dispatch(ctx, s_fn[8]); }
 void func_000357A0(ppu_context* ctx) { dispatch(ctx, s_fn[9]); }
 void func_00024F58(ppu_context* ctx) { dispatch(ctx, s_fn[10]); }
 void func_002993A0(ppu_context* ctx) { dispatch(ctx, s_fn[11]); }
+void func_0004A39C(ppu_context* ctx) { dispatch(ctx, s_fn[12]); }
+void func_0004A428(ppu_context* ctx) { dispatch(ctx, s_fn[13]); }
+void func_0004A300(ppu_context* ctx) { dispatch(ctx, s_fn[14]); }
+void func_0004A118(ppu_context* ctx) { dispatch(ctx, s_fn[15]); }
+void func_0004E100(ppu_context* ctx) { dispatch(ctx, s_fn[16]); }
+void func_0004EE80(ppu_context* ctx) { dispatch(ctx, s_fn[17]); }
