@@ -75,6 +75,26 @@ void func_0004E100_lifted(ppu_context* ctx);
 void func_0004EE80_lifted(ppu_context* ctx);
 void func_00292628(ppu_context* ctx);   // memmove, native in dbz3_ppu_native.cpp
 void func_002B6E00(ppu_context* ctx);
+// batch 2 (natives below) and the guest code they call
+void func_0002C7D8_lifted(ppu_context* ctx);
+void func_00031DC8_lifted(ppu_context* ctx);
+void func_0002F56C_lifted(ppu_context* ctx);
+void func_00030790_lifted(ppu_context* ctx);
+void func_00030DF0_lifted(ppu_context* ctx);
+void func_00031024_lifted(ppu_context* ctx);
+void func_000207C0_lifted(ppu_context* ctx);
+void func_0002C7D8(ppu_context* ctx);
+void func_00030790(ppu_context* ctx);
+void func_00024F58(ppu_context* ctx);
+void func_00017464(ppu_context* ctx);
+void func_0002BAE8(ppu_context* ctx);
+void func_0002C088(ppu_context* ctx);
+void func_00029734(ppu_context* ctx);
+void func_000204D0(ppu_context* ctx);
+void func_00020658(ppu_context* ctx);
+void func_00026190(ppu_context* ctx);
+void func_00029784(ppu_context* ctx);
+void func_000298A0(ppu_context* ctx);
 /* The lift's fast-memory switch and SPU reservation watch (as dbz3_liftfast.h). */
 extern "C" {
 extern const int nm_fast_vm __asm__("g_ppu_fast_vm");
@@ -996,6 +1016,589 @@ bool vcall_a2o_native(ppu_context* c)
     return true;
 }
 
+/* ---- batch 2: draw and animation helpers (run136 profile) --------------------
+ * Same operations as the lift, in the same order, with the lift's helpers for
+ * the scalar floating point (fmuls, fdivs, fmadds, frsp, fctiwz) and plain
+ * float arithmetic for the AltiVec lanes (multiply, then add: no fusion, as the
+ * lift's NEON rewrite). Vector results are only ever used through a splat of
+ * element 0 or stored with stvewx from a splat, so element 0 is computed alone.
+ * Calls to other guest code go through their func_ symbols with the registers
+ * the lift sets; stack scratch the guest never reads back is not written. */
+inline uint32_t r16(uint64_t a) { uint16_t v; memcpy(&v, vm_base + (uint32_t)a, 2); return __builtin_bswap16(v); }
+inline void w16(uint64_t ea, uint32_t v)
+{
+    const uint32_t a = (uint32_t)ea;
+    dbz3_store_hook(a, 2u);
+    const uint16_t s = __builtin_bswap16((uint16_t)v);
+    memcpy(vm_base + a, &s, 2);
+}
+/* Element 0 of the lift's lvlx: bytes ea.. up to the end of the 16-byte block,
+ * zeros after. */
+inline uint32_t lvlx_w0(uint64_t ea)
+{
+    const uint32_t a = (uint32_t)ea, sh = a & 0xFu;
+    if (sh <= 12u) return r32(a);
+    const uint8_t* m = vm_base + (a & ~0xFu);
+    uint32_t w = 0;
+    for (uint32_t i = 0; i < 4; i++) w = (w << 8) | (sh + i < 16u ? m[sh + i] : 0u);
+    return w;
+}
+inline float fbits(uint32_t w) { float f; memcpy(&f, &w, 4); return f; }
+inline uint32_t bitsf(float f) { uint32_t w; memcpy(&w, &f, 4); return w; }
+inline double rt(double d) { return (double)(float)d; }            // stfs then lfs
+inline double fs_div(double a, double b) { return ppu_fp_single(ppu_fdiv(a, b)); }
+inline double fs_sub(double a, double b) { return ppu_fp_single(ppu_fsub(a, b)); }
+inline double fcfid_s(int64_t v) { return ppu_frsp((double)v); }    // fcfid + frsp
+constexpr float kNegZero = -0.0f;                                   // vslw(-1, -1)
+
+/* 0x0002C7D8: material color word. r3 = material, r4 = color source (0: the
+ * zero block), r5 = tint (0: the default). Includes 0x0002C6E8. */
+bool color_native(ppu_context* c)
+{
+    const uint32_t mat = (uint32_t)c->gpr[3];
+    const uint64_t src = c->gpr[4], tint = c->gpr[5];
+    const double Ka = lfs(0x2C7CCu), Kb = lfs(0x2C7D0u);
+    const uint32_t F = r32(mat);
+    const uint32_t m = F & 0x700u;
+    double s[4] = { 0.0, 0.0, 0.0, 0.0 };
+    if (m != 0x400u && m != 0x200u && (int32_t)src != 0)
+        for (int i = 0; i < 4; i++) s[i] = lfs(src + 4u * i);
+    double o[4];
+    if (m == 0x400u) {
+        const double v = lfs(0x2C6E0u);
+        o[0] = o[1] = o[2] = o[3] = v;
+    } else if (m == 0x300u) {
+        for (int i = 0; i < 4; i++) o[i] = fs_mul(s[i], lfs(0x40C750u + 4u * i));
+    } else if (m == 0x200u) {
+        for (int i = 0; i < 4; i++) o[i] = lfs(0x40C750u + 4u * i);
+    } else {
+        for (int i = 0; i < 4; i++) o[i] = s[i];
+    }
+    for (int i = 0; i < 4; i++) o[i] = rt(o[i]);
+    double t[4];
+    for (int i = 0; i < 4; i++) t[i] = (int32_t)tint != 0 ? lfs(tint + 4u * i) : Ka;
+    double p0, p1, p2, p3;
+    if ((F & 2u) && m != 0x400u && m != 0x100u) { p0 = t[0]; p1 = t[1]; p2 = t[2]; p3 = t[3]; }
+    else p0 = p1 = p2 = p3 = Kb;
+    if (m != 0) {
+        p0 = fs_mul(p0, o[0]);
+        p2 = fs_mul(p2, o[2]);
+        p1 = fs_mul(p1, o[1]);
+        if ((F & 0x20u) || !(F & 2u)) p3 = fs_mul(p3, o[3]);
+    }
+    const double S = lfs(0x2C7D4u);
+    auto q = [&](double p) -> uint32_t {
+        const int32_t v = (int16_t)ppu_f2i32(fs_mul(p, S), 0);
+        return v < 0 ? 0u : v > 255 ? 255u : (uint32_t)v;
+    };
+    const uint32_t a = q(p0), b = q(p1), g = q(p2), d = q(p3);
+    c->gpr[3] = (a << 24) | (b << 16) | (g << 8) | d;
+    return true;
+}
+
+/* 0x00031DC8: texture reference of obj (+0x944, 0x20 bytes) from the
+ * renderer's table; zeros when there is none. Keeps the port's pointer
+ * checks of the lift. */
+bool texref_native(ppu_context* c)
+{
+    const uint64_t obj = c->gpr[3], a = c->gpr[4], b = c->gpr[5];
+    const uint32_t dst = (uint32_t)(obj + 0x944u);
+    auto zero = [&]() {
+        w8(dst, 0); w16(dst + 2u, 0); w16(dst + 4u, 0); w32(dst + 8u, 0); w32(dst + 0xCu, 0);
+        w8(dst + 0x10u, 0); w32(dst + 0x14u, 0); w32(dst + 0x18u, 0); w32(dst + 0x1Cu, 0);
+        c->gpr[3] = 0;
+        return true;
+    };
+    const uint32_t base = r32(0x47BD50u);
+    if ((int32_t)base == 0 || (int32_t)b == -1) return zero();
+    GuestFrame fr(c, 0x90);
+    const uint32_t r7 = r32(base + 0x18u);
+    const uint32_t r8 = r32(0x40CB90u);
+    const int64_t off = (int64_t)(int32_t)(uint32_t)((b - (uint64_t)r7) << 2);
+    const uint32_t R = r32(0x47C5C0u);
+    const uint32_t opd1 = r32(r32(R) + 0xB8u);
+    const uint32_t ent = (uint32_t)((uint64_t)base + r32((uint32_t)((uint64_t)r8 + (uint64_t)off)));
+    w64(c->gpr[1] + 0x28u, c->gpr[2]);
+    if (ent < 0x10000u || ent >= 0x80000000u || (ent & 3u)) return zero();
+    const uint32_t tex = r32(ent + 0x14u);
+    if (tex & 3u) {
+        static unsigned misaligned_reports = 0;
+        if (misaligned_reports++ < 8u)
+            fprintf(stderr, "[dbz3] misaligned object ptr=0x%08X owner=0x%08X lr=0x%08X\n",
+                    tex, ent, (uint32_t)c->lr);
+        return zero();
+    }
+    if (tex < 0x10000u || tex >= 0x80000000u) return zero();
+    c->gpr[3] = R;
+    c->gpr[4] = tex;
+    c->gpr[5] = a & 0xFFu;
+    c->gpr[7] = r7;
+    c->gpr[8] = r8;
+    call_opd(c, opd1, 6);
+    const uint32_t opd2 = r32(r32(tex) + 8u);
+    c->gpr[3] = tex;
+    c->gpr[4] = opd2;
+    call_opd(c, opd2, 5);
+    const uint32_t sp = (uint32_t)c->gpr[3];
+    const uint32_t v0 = r8u(sp), v2 = r16(sp + 2u), v4 = r16(sp + 4u), v8 = r32(sp + 8u);
+    const uint32_t vc = r32(sp + 0xCu), v10 = r8u(sp + 0x10u), v14 = r32(sp + 0x14u), v18 = r32(sp + 0x18u);
+    w8(dst, v0); w16(dst + 2u, v2); w16(dst + 4u, v4); w32(dst + 8u, v8); w32(dst + 0xCu, vc);
+    w8(dst + 0x10u, v10); w32(dst + 0x14u, v14); w32(dst + 0x18u, v18); w32(dst + 0x1Cu, ent);
+    c->gpr[3] = v18;
+    return true;
+}
+
+/* 0x0002F56C: draw setup of obj: parameter block (0x0002BAE8) copied to
+ * obj + 0x858, material (0x0002C088), renderer state calls, and the globals
+ * at 0x00478B40.. remembered for the next call. */
+bool drawsetup_native(ppu_context* c)
+{
+    const uint64_t obj = c->gpr[3], in4 = c->gpr[4], in5 = c->gpr[5], in6 = c->gpr[6];
+    const uint64_t in7 = c->gpr[7], in8 = c->gpr[8], in9 = c->gpr[9], in10 = c->gpr[10];
+    GuestFrame fr(c, 0x150);
+    const uint64_t sp = c->gpr[1];
+    const uint32_t prev = r32(0x478B40u);
+    if ((int32_t)prev != -1) {
+        c->gpr[3] = prev;
+        c->gpr[11] = 0x480000u;
+        c->lr = 0x0002F5D0u;
+        func_00017464(c); DRAIN_TRAMPOLINE(c);
+        w32(0x478B40u, 0xFFFFFFFFu);
+    }
+    w32(obj + 0x964u, 0);
+    w32(obj + 0x96Cu, 0);
+    w32(obj + 0x970u, 0);
+    c->gpr[3] = sp + 0x70u;
+    c->gpr[4] = (uint32_t)in6;
+    c->gpr[5] = in9;
+    c->gpr[6] = in10;
+    c->gpr[7] = r8u(obj + 0xB24u);
+    c->gpr[8] = r8u(obj + 0xB49u);
+    c->lr = 0x0002F60Cu;
+    func_0002BAE8(c); DRAIN_TRAMPOLINE(c);
+    const uint32_t dst = (uint32_t)(obj + 0x858u);
+    for (uint32_t i = 0; i < 0x98u; i += 8u) {
+        const uint32_t s = (uint32_t)(sp + i);
+        const uint32_t x = r32(s + 0x70u), y = r32(s + 0x74u);
+        w32(dst + i, x);
+        w32(dst + i + 4u, y);
+    }
+    c->gpr[3] = dst;
+    c->gpr[4] = r32(0x47C5C0u);
+    c->lr = 0x0002F65Cu;
+    func_0002C088(c); DRAIN_TRAMPOLINE(c);
+    {
+        const uint32_t R = r32(0x47C5C0u);
+        const uint32_t opd = r32(r32(R) + 0x3Cu);
+        c->gpr[3] = R;
+        c->gpr[4] = 0x47A300u;
+        c->gpr[5] = opd;
+        call_opd(c, opd, 6);
+    }
+    const int32_t m = (int32_t)in5;
+    auto vsel = [&](uint64_t r4v, uint32_t r5v) {
+        const uint32_t X = r32(0x47C5C8u);
+        const uint32_t opd = r32(r32(X) + 8u);
+        c->gpr[3] = X;
+        c->gpr[4] = r4v;
+        c->gpr[5] = r5v;
+        c->gpr[6] = opd;
+        call_opd(c, opd, 7);
+        w32(obj + 0x964u, r5v);
+    };
+    if (m == 2 || m == 3) vsel((uint32_t)in4, 0);
+    else if (m == 4 || m == 5) vsel(0, 1);
+    else if (m == 6 || m == 7) vsel((uint32_t)in4, 1);
+    uint32_t flag = 0;
+    if (m >= 4 && m <= 6) {
+        flag = (r32(obj + 0x858u) & 0x20u) ? 1u : 0u;
+    } else if (m == 7) {
+        const uint32_t F = r32(obj + 0x858u);
+        flag = (F & 4u) ? 1u : 0u;
+        if (F & 0x2000u) flag = 0;
+        if (!(F & 0x20u)) flag = 0;
+        else if (F & 0x10000000u) flag = 0;
+    }
+    uint32_t on = 0;
+    if (flag) on = r8u(obj + 0x85Cu) ? 1u : 0u;
+    {
+        const uint32_t R = r32(0x47C5C0u);
+        const uint32_t opd = r32(r32(R) + 0xE0u);
+        c->gpr[3] = R;
+        c->gpr[4] = on;
+        c->gpr[5] = opd;
+        call_opd(c, opd, 6);
+    }
+    if ((int32_t)in8 >= 0) {
+        c->gpr[3] = 0; c->gpr[4] = in8;
+        c->gpr[5] = c->gpr[6] = c->gpr[7] = c->gpr[8] = 0;
+        c->lr = 0x0002F868u;
+        func_00029734(c); DRAIN_TRAMPOLINE(c);
+    }
+    {
+        const int32_t v = (int32_t)r32(obj + 0x9C0u);
+        if (v >= 0 && (r32(obj + 0x858u) & 0x2000u)) {
+            c->gpr[3] = 1; c->gpr[4] = (uint64_t)(int64_t)v;
+            c->gpr[5] = c->gpr[6] = c->gpr[7] = c->gpr[8] = 0;
+            c->lr = 0x0002F8A4u;
+            func_00029734(c); DRAIN_TRAMPOLINE(c);
+        }
+    }
+    w32(obj + 0x968u, (uint32_t)in7);
+    w32(0x478B44u, (uint32_t)in6);
+    w32(0x478B40u, (uint32_t)in5);
+    w32(0x478B5Cu, (uint32_t)in4);
+    return true;
+}
+
+/* 0x00030790: textured quad. r3 = obj, r4 = position, r5 = color source,
+ * r6 = size (x, y, u, v). With the "scaled" flag the UVs are divided by the
+ * texture size (Newton refined reciprocals, as the lift); on odd calls the
+ * quad is drawn with six vertex calls, on even calls it is remembered. */
+bool quad_native(ppu_context* c)
+{
+    const uint32_t obj = (uint32_t)c->gpr[3];
+    const uint64_t P = c->gpr[4], B = c->gpr[5], Q = c->gpr[6];
+    const uint32_t u946 = r16(obj + 0x946u), u948 = r16(obj + 0x948u);
+    const uint32_t flags = r32(obj + 0x858u), Z = r32(obj + 0x960u);
+    double f31 = lfs(Q), f30 = lfs(Q + 4u);
+    const uint32_t w946 = lvlx_w0(obj + 0x946u), w948 = lvlx_w0(obj + 0x948u);
+    uint32_t v4 = lvlx_w0(Q), v2 = lvlx_w0(Q + 4u);
+    const float q0 = fbits(v4), q1 = fbits(v2);
+    const double f5 = fcfid_s((int64_t)u946), f4 = fcfid_s((int64_t)u948);
+    double f1 = lfs(Q + 8u), f2 = lfs(Q + 0xCu);
+    const float x7 = (float)(w946 >> 16), x8 = (float)(w948 >> 16);
+    if ((flags & 0x40000000u) && x7 > 0.0f && x8 > 0.0f) {
+        const double f3c = lfs(0x30788u);
+        const float K = fbits(lvlx_w0(0x3078Cu));
+        float s3 = q0, s2 = q1;
+        if ((int32_t)Z != 0) {
+            const float s10 = (float)((int32_t)lvlx_w0(Z + 0x10u) >> 16);
+            const float s12 = (float)((int32_t)lvlx_w0(Z + 0x12u) >> 16);
+            const float s8 = (float)((int32_t)lvlx_w0(Z + 8u) >> 16);
+            const float sA = (float)((int32_t)lvlx_w0(Z + 0xAu) >> 16);
+            const double zf1 = fs_div(fcfid_s((int16_t)r16(Z + 8u)), fcfid_s((int16_t)r16(Z + 0x10u)));
+            const double zf2 = fs_div(fcfid_s((int16_t)r16(Z + 0xAu)), fcfid_s((int16_t)r16(Z + 0x12u)));
+            const float r11 = 1.0f / s10, r13 = 1.0f / s12;
+            const float v12 = K - r11 * s10;
+            const float v14 = K - r13 * s12;
+            const float v10 = r11 * v12 + kNegZero;
+            const float v1 = K - v10 * s10;
+            const float v10b = v10 * v1 + kNegZero;
+            const float v11 = r13 * v14 + kNegZero;
+            const float v3 = K - v10b * s10;
+            const float v16 = K - v11 * s12;
+            f31 = fs_mul(f31, zf1);
+            const float v3b = v10b * v3 + kNegZero;
+            const float v10c = v11 * v16 + kNegZero;
+            const float v3c = v3b * s8 + kNegZero;
+            const float v9 = K - v10c * s12;
+            const float v3d = q0 * v3c + kNegZero;
+            const float v9b = v10c * v9 + kNegZero;
+            f30 = fs_mul(f30, zf2);
+            const float v2a = v9b * sA + kNegZero;
+            const float v2b = q1 * v2a + kNegZero;
+            s3 = v3d;
+            s2 = v2b;
+        }
+        const float a5 = 1.0f / x7, a6 = 1.0f / x8;
+        f31 = fs_div(f31, f5);
+        const float e12 = K - a5 * x7;
+        const float e13 = K - a6 * x8;
+        f30 = fs_div(f30, f4);
+        const float b5 = a5 * e12 + kNegZero;
+        const float b6 = a6 * e13 + kNegZero;
+        const float g12 = K - b5 * x7;
+        const float g13 = K - b6 * x8;
+        const float c5 = b5 * g12 + kNegZero;
+        const float c6 = b6 * g13 + kNegZero;
+        const float h7 = K - c5 * x7;
+        const float h4 = K - c6 * x8;
+        const float d5 = c5 * h7 + kNegZero;
+        const float d6 = c6 * h4 + kNegZero;
+        v4 = bitsf(d5 * s3 + kNegZero);
+        v2 = bitsf(d6 * s2 + kNegZero);
+        f1 = f2 = f3c;
+    }
+    const uint32_t cnt = r32(obj + 0x970u);
+    if ((cnt & 1u) == 0) {
+        for (uint32_t i = 0; i < 16u; i += 4u) stfs(obj + 0x980u + i, lfs(P + i));
+        w32((obj + 0x990u) & ~3u, v4);
+        w32((obj + 0x994u) & ~3u, v2);
+        stfs(obj + 0x998u, f1);
+        stfs(obj + 0x99Cu, f2);
+        return true;
+    }
+    const double X0 = lfs(obj + 0x980u), Y0 = lfs(obj + 0x984u), Z1 = lfs(P + 8u);
+    const double X1 = lfs(P), Y1 = lfs(P + 4u);
+    const double U0 = lfs(obj + 0x990u), V0 = lfs(obj + 0x994u);
+    GuestFrame fr(c, 0x120);
+    const uint64_t sp = c->gpr[1];
+    c->gpr[3] = (obj + 0x858u) & 0xFFFFFFFFull;
+    c->gpr[4] = r32(obj + 0x968u);
+    c->gpr[5] = B;
+    c->lr = 0x00030B78u;
+    func_0002C7D8(c); DRAIN_TRAMPOLINE(c);
+    w32(sp + 0x70u, (uint32_t)c->gpr[3]);
+    struct V { double x, y, u, v; };
+    const V vs[6] = { { X0, Y0, U0, V0 }, { X1, Y0, f31, V0 }, { X0, Y1, U0, f30 },
+                      { X0, Y1, U0, f30 }, { X1, Y0, f31, V0 }, { X1, Y1, f31, f30 } };
+    for (const V& v : vs) {
+        const double sx = lfs(obj + 0x9A8u), ox = lfs(obj + 0x9A0u);
+        const double sy = lfs(obj + 0x9ACu), oy = lfs(obj + 0x9A4u);
+        const double x = ppu_fp_single(ppu_fmadd_core(v.x, sx, ox, 0, 0));
+        const double y = ppu_fp_single(ppu_fmadd_core(v.y, sy, oy, 0, 0));
+        const uint32_t R = r32(0x47C5C8u);
+        stfs(sp + 0x7Cu, Z1);
+        stfs(sp + 0x74u, x);
+        stfs(sp + 0x78u, y);
+        const uint32_t opd = r32(r32(R) + 0x1Cu);
+        c->gpr[3] = R;
+        c->gpr[4] = sp + 0x74u;
+        c->gpr[5] = sp + 0x70u;
+        c->gpr[6] = opd;
+        c->fpr[1] = v.u;
+        c->fpr[2] = v.v;
+        call_opd(c, opd, 7);
+    }
+    return true;
+}
+
+/* 0x00030DF0 / 0x00031024: sprite. Mode 4 (0x00478B40) hands over to the
+ * quad; otherwise one vertex call with the size scaled like the quad's UVs. */
+bool sprite_common(ppu_context* c, uint64_t P, uint64_t Bc, uint64_t Q, uint32_t first, bool v2)
+{
+    const uint32_t obj = (uint32_t)c->gpr[3];
+    const uint64_t in4 = c->gpr[4], in5 = c->gpr[5], in6 = c->gpr[6];
+    const uint32_t cnt = r32(obj + 0x970u), flags = r32(obj + 0x858u);
+    const uint32_t w946 = lvlx_w0(obj + 0x946u), w948 = lvlx_w0(obj + 0x948u);
+    const uint32_t u946 = r16(obj + 0x946u), u948 = r16(obj + 0x948u);
+    const uint32_t Z = r32(obj + 0x960u), sel = r32(obj + 0x968u);
+    if ((int32_t)cnt == 0) w32(obj + 0x96Cu, first);
+    GuestFrame fr(c, 0xB0);
+    if ((int32_t)r32(0x478B40u) == 4) {
+        c->gpr[3] = obj;
+        if (v2) { c->gpr[4] = in4; c->gpr[5] = in5; c->gpr[6] = in6; c->lr = 0x000310C8u; }
+        else { c->gpr[4] = in4; c->gpr[5] = 0; c->gpr[6] = in5; c->lr = 0x00030E7Cu; }
+        func_00030790(c); DRAIN_TRAMPOLINE(c);
+    } else {
+        double f31 = lfs(Q), f30 = lfs(Q + 4u);
+        const double f2 = fcfid_s((int64_t)u946), f1 = fcfid_s((int64_t)u948);
+        if ((flags & 0x40000000u) && (float)(w946 >> 16) > 0.0f && (float)(w948 >> 16) > 0.0f) {
+            if ((int32_t)Z != 0) {
+                const double d3 = fs_div(fcfid_s((int16_t)r16(Z + 8u)), fcfid_s((int16_t)r16(Z + 0x10u)));
+                const double d4 = fs_div(fcfid_s((int16_t)r16(Z + 0xAu)), fcfid_s((int16_t)r16(Z + 0x12u)));
+                f31 = fs_mul(f31, d3);
+                f30 = fs_mul(f30, d4);
+            }
+            f31 = fs_div(f31, f2);
+            f30 = fs_div(f30, f1);
+        }
+        const double x = ppu_fp_single(ppu_fmadd_core(lfs(P), lfs(obj + 0x9A8u), lfs(obj + 0x9A0u), 0, 0));
+        const double y = ppu_fp_single(ppu_fmadd_core(lfs(P + 4u), lfs(obj + 0x9ACu), lfs(obj + 0x9A4u), 0, 0));
+        const uint32_t R = r32(0x47C5C8u);
+        const double z = lfs(P + 8u);
+        const uint64_t sp = c->gpr[1];
+        stfs(sp + 0x7Cu, z);
+        stfs(sp + 0x74u, x);
+        stfs(sp + 0x78u, y);
+        c->gpr[3] = (obj + 0x858u) & 0xFFFFFFFFull;
+        c->gpr[4] = sel;
+        c->gpr[5] = v2 ? Bc : 0;
+        c->lr = v2 ? 0x00031210u : 0x00030FC0u;
+        func_0002C7D8(c); DRAIN_TRAMPOLINE(c);
+        w32(sp + 0x70u, (uint32_t)c->gpr[3]);
+        const uint32_t opd = r32(r32(R) + 0x1Cu);
+        c->gpr[3] = R;
+        c->gpr[4] = sp + 0x74u;
+        c->gpr[5] = sp + 0x70u;
+        c->gpr[6] = opd;
+        c->fpr[1] = f31;
+        c->fpr[2] = f30;
+        call_opd(c, opd, 7);
+    }
+    w32(obj + 0x970u, r32(obj + 0x970u) + 1u);
+    return true;
+}
+bool sprite_native(ppu_context* c) { return sprite_common(c, c->gpr[4], 0, c->gpr[5], 0x21u, false); }
+bool sprite2_native(ppu_context* c) { return sprite_common(c, c->gpr[4], c->gpr[5], c->gpr[6], 0x31u, true); }
+
+/* 0x000207C0: bone animation of one model: for each bone, rotation keys
+ * (0x000204D0, 0x00024F58, 0x00026190), translation and scale keys
+ * (0x00020658, 0x000298A0), or the bind pose (0x00029784). */
+void anim_vec_key(ppu_context* c, uint32_t trk, uint32_t D, uint64_t Bp, uint32_t slot, uint64_t r4v,
+                  uint32_t lr1, uint64_t tmp, uint32_t lr2)
+{
+    c->fpr[1] = lfs(Bp + 8u);
+    c->gpr[3] = trk;
+    c->gpr[4] = r4v;
+    c->gpr[5] = (uint64_t)(int64_t)(int32_t)r32(slot);
+    c->lr = lr1;
+    func_00020658(c); DRAIN_TRAMPOLINE(c);
+    const uint64_t k = c->gpr[3];
+    w32(slot, (uint32_t)k);
+    const uint32_t K = (uint32_t)(trk + (k << 4) + 0xCu);
+    const uint32_t kt = r32(K);
+    const float t0 = (float)(int32_t)lvlx_w0(K);
+    const float tv = fbits(lvlx_w0(Bp + 8u));
+    const double ft = lfs(Bp + 8u);
+    const double f1k = fcfid_s((int64_t)(int32_t)kt);
+    auto copy = [&]() {
+        stfs(D, lfs(K + 4u));
+        stfs(D + 4u, lfs(K + 8u));
+        const double z = lfs(K + 0xCu);
+        w32(D + 0xCu, 0x3F800000u);
+        stfs(D + 8u, z);
+    };
+    if (t0 == tv) { copy(); return; }
+    const int32_t n = (int32_t)r32(trk + 4u);
+    if (n > 1 || n <= -1) return;
+    copy();
+    const uint32_t K2 = (uint32_t)(K + 0x10u);
+    stfs(tmp, lfs(K2 + 4u));
+    stfs(tmp + 4u, lfs(K2 + 8u));
+    const double z2 = lfs(K2 + 0xCu);
+    w32(tmp + 0xCu, 0x3F800000u);
+    stfs(tmp + 8u, z2);
+    double f1 = fs_sub(ft, f1k);
+    const int64_t d = (int64_t)(int32_t)(r32(K2) - kt);
+    const double f2 = fcfid_s(d);
+    f1 = fs_div(f1, f2);
+    c->gpr[3] = D;
+    c->gpr[4] = D;
+    c->gpr[5] = tmp;
+    c->fpr[1] = f1;
+    c->fpr[2] = f2;
+    c->fpr[3] = z2;
+    c->lr = lr2;
+    func_000298A0(c); DRAIN_TRAMPOLINE(c);
+}
+
+bool anim_native(ppu_context* c)
+{
+    const uint64_t A = c->gpr[3], Bp = c->gpr[4];
+    const uint32_t M = r32(0x40CAD0u);
+    const int64_t key = (int64_t)((int32_t)r32((uint32_t)Bp) >> 16);
+    const int32_t N = (int32_t)r32(r32((uint32_t)A + 4u) + 0x10u);
+    const uint32_t T = (uint32_t)(A + ((uint64_t)(key - 1) << 9) + 0x4B0u);
+    if (N <= 0) return true;
+    GuestFrame fr(c, 0x130);
+    const uint64_t sp = c->gpr[1];
+    uint64_t r20 = 0, r21 = 0, r22 = 0;
+    auto bind = [&](uint64_t extra) -> uint32_t {
+        return (uint32_t)(r32(r32((uint32_t)A + 4u) + 0x14u) + r20 + extra);
+    };
+    for (int32_t i = 0; i < N; ++i, r21 += 2u, r20 += 0x50u) {
+        const int32_t idx = (int16_t)r16((uint32_t)(T + (uint64_t)(int64_t)(int32_t)r21));
+        if (idx < 0) {
+            if (idx != -1) continue;
+            if ((int32_t)r32(0x40CAE0u) != 1) {
+                const uint32_t S = (uint32_t)(r32((uint32_t)Bp + 0x10u) + r22);
+                c->gpr[3] = S;
+                c->gpr[4] = bind(0);
+                c->lr = 0x00020D94u;
+                func_00029784(c); DRAIN_TRAMPOLINE(c);
+                w32(S + 0x10u, 0); w32(S + 0x14u, 0); w32(S + 0x18u, 0); w32(S + 0x1Cu, 0x3F800000u);
+                c->gpr[3] = (uint32_t)(r32((uint32_t)Bp + 0x10u) + r22 + 0x20u);
+                c->gpr[4] = bind(0x20);
+                c->lr = 0x00020DD4u;
+                func_00029784(c); DRAIN_TRAMPOLINE(c);
+                w32(S + 0x30u, 0xFFFFFFFFu); w32(S + 0x34u, 0xFFFFFFFFu); w32(S + 0x38u, 0xFFFFFFFFu);
+            }
+            r22 += 0x40u;
+            continue;
+        }
+        const uint32_t S = (uint32_t)(r32((uint32_t)Bp + 0x10u) + r22);
+        const uint64_t i12 = (uint64_t)idx * 12u, i8 = (uint64_t)idx << 3, i4 = (uint64_t)idx << 2;
+        /* rotation */
+        {
+            const uint32_t fl = r32(M);
+            bool bindpose = true;
+            if (fl & 1u) {
+                const uint32_t tb = r32(M + 0xCu);
+                const uint32_t trk = r32((uint32_t)(tb + ((fl & 0x10u) ? i12 : i8)));
+                if (trk != 0) {
+                    bindpose = false;
+                    c->fpr[1] = lfs(Bp + 8u);
+                    c->gpr[3] = trk;
+                    c->gpr[4] = tb;
+                    c->gpr[5] = (uint64_t)(int64_t)(int32_t)r32(S + 0x30u);
+                    c->lr = 0x000208D8u;
+                    func_000204D0(c); DRAIN_TRAMPOLINE(c);
+                    const uint64_t k = c->gpr[3];
+                    w32(S + 0x30u, (uint32_t)k);
+                    const uint32_t K = (uint32_t)(trk + (k << 3) + 0xCu);
+                    c->gpr[3] = S;
+                    c->gpr[4] = r16(K + 2u); c->gpr[5] = r16(K + 4u); c->gpr[6] = r16(K + 6u);
+                    c->lr = 0x00020900u;
+                    func_00024F58(c); DRAIN_TRAMPOLINE(c);
+                    const float t0 = (float)((int32_t)lvlx_w0(K) >> 16);
+                    const float tv = fbits(lvlx_w0(Bp + 8u));
+                    if (!(t0 == tv)) {
+                        const uint32_t K2 = (uint32_t)(K + 8u);
+                        c->gpr[3] = sp + 0x70u;
+                        c->gpr[4] = r16(K2 + 2u); c->gpr[5] = r16(K2 + 4u); c->gpr[6] = r16(K2 + 6u);
+                        c->lr = 0x0002094Cu;
+                        func_00024F58(c); DRAIN_TRAMPOLINE(c);
+                        const int64_t a = (int16_t)r16(K), b = (int16_t)r16(K2);
+                        double f1 = fs_sub(lfs(Bp + 8u), fcfid_s(a));
+                        const int64_t d = (int64_t)(int32_t)(b - a);
+                        const double f2 = fcfid_s(d);
+                        f1 = fs_div(f1, f2);
+                        c->gpr[3] = S;
+                        c->gpr[4] = S;
+                        c->gpr[5] = sp + 0x70u;
+                        c->gpr[6] = (uint64_t)d;
+                        c->fpr[1] = f1;
+                        c->fpr[2] = f2;
+                        c->lr = 0x000209A8u;
+                        func_00026190(c); DRAIN_TRAMPOLINE(c);
+                    }
+                }
+            }
+            if (bindpose && (int32_t)r32(0x40CAE0u) != 1) {
+                c->gpr[3] = S;
+                c->gpr[4] = bind(0);
+                c->lr = 0x000209D8u;
+                func_00029784(c); DRAIN_TRAMPOLINE(c);
+                w32(S + 0x30u, 0xFFFFFFFFu);
+            }
+        }
+        /* translation */
+        {
+            const uint32_t fl = r32(M);
+            const uint32_t tb = r32(M + 0xCu);
+            const uint32_t trk = !(fl & 1u) ? r32((uint32_t)(tb + i4))
+                               : r32((uint32_t)(tb + ((fl & 0x10u) ? i12 : i8) + 4u));
+            if (trk != 0) {
+                anim_vec_key(c, trk, S + 0x10u, Bp, S + 0x34u, tb, 0x00020A68u, sp + 0x80u, 0x00020B74u);
+            } else if ((int32_t)r32(0x40CAE0u) != 1) {
+                w32(S + 0x10u, 0); w32(S + 0x14u, 0); w32(S + 0x18u, 0);
+                w32(S + 0x1Cu, 0x3F800000u); w32(S + 0x34u, 0xFFFFFFFFu);
+            }
+        }
+        /* scale */
+        {
+            const uint32_t fl = r32(M);
+            uint32_t trk = 0;
+            if (fl & 0x10u) trk = r32((uint32_t)(r32(M + 0xCu) + i12 + 8u));
+            if (trk != 0) {
+                const uint64_t base = (uint64_t)r32((uint32_t)Bp + 0x10u) + r22;
+                anim_vec_key(c, trk, (uint32_t)(base + 0x20u), Bp, S + 0x38u, base, 0x00020C08u,
+                             sp + 0x90u, 0x00020D08u);
+            } else if ((int32_t)r32(0x40CAE0u) != 1) {
+                c->gpr[3] = (uint32_t)(r32((uint32_t)Bp + 0x10u) + r22 + 0x20u);
+                c->gpr[4] = bind(0x20);
+                c->lr = 0x00020D48u;
+                func_00029784(c); DRAIN_TRAMPOLINE(c);
+                w32(S + 0x38u, 0xFFFFFFFFu);
+            }
+        }
+        r22 += 0x40u;
+    }
+    return true;
+}
+
 /* ---- dispatch and verification --------------------------------------------- */
 uint64_t guest_hash(uint32_t ea)
 {
@@ -1029,7 +1632,7 @@ struct Entry {
     int mode;                        // 0 undecided, -1 lifted, 1 native, 2 native + verify
     Stats st;
 };
-Entry s_fn[18] = {
+Entry s_fn[25] = {
     { "sincos 0x002A733C", "native-sincos-off", sincos_native, func_002A733C_lifted, kF1,
       { 0x002A733Cu, 0x002A6EB4u }, { 0x898D1DFC4B4A86C9ull, 0x78F3A78B7569B3CFull }, 0, {} },
     { "matrix 0x000252B0", "native-matrix-off", matrix_native, func_000252B0_lifted, kGlobalMatrix,
@@ -1078,6 +1681,14 @@ Entry s_fn[18] = {
     { "vcall-a2o 0x0004EE80", "native-vcall-a2o-off", vcall_a2o_native, func_0004EE80_lifted, kNone,
       { 0x0004EE80u, 0x0004EEA0u, 0x0004EEC0u },
       { 0x87F120F87D1B2AB7ull, 0x09061E51AE76FED6ull, 0x08595D12BEB9BF64ull }, 0, {} },
+    /* batch 2: no guest-code hash (kept out of the check); native-b2-off turns all off */
+    { "color 0x0002C7D8", "native-color-off", color_native, func_0002C7D8_lifted, kR3, {}, {}, 0, {} },
+    { "texref 0x00031DC8", "native-texref-off", texref_native, func_00031DC8_lifted, kNone, {}, {}, 0, {} },
+    { "drawsetup 0x0002F56C", "native-drawsetup-off", drawsetup_native, func_0002F56C_lifted, kNone, {}, {}, 0, {} },
+    { "quad 0x00030790", "native-quad-off", quad_native, func_00030790_lifted, kNone, {}, {}, 0, {} },
+    { "sprite 0x00030DF0", "native-sprite-off", sprite_native, func_00030DF0_lifted, kNone, {}, {}, 0, {} },
+    { "sprite2 0x00031024", "native-sprite2-off", sprite2_native, func_00031024_lifted, kNone, {}, {}, 0, {} },
+    { "anim 0x000207C0", "native-anim-off", anim_native, func_000207C0_lifted, kNone, {}, {}, 0, {} },
 };
 const uint32_t kMatrix = 0x0047A300u;
 
@@ -1125,7 +1736,7 @@ void decide(Entry& e)
 {
     bool ok = true;
     for (int h = 0; h < 4 && e.hash_ea[h]; h++) ok = ok && guest_hash(e.hash_ea[h]) == e.hash[h];
-    const bool off = sd_flag(e.off_flag);
+    const bool off = sd_flag(e.off_flag) || (&e >= &s_fn[18] && sd_flag("native-b2-off"));
     const bool verify = sd_flag("native-verify");
     e.mode = (!ok || off) ? -1 : verify ? 2 : 1;
     fprintf(stderr, "[native-A] %s: %s\n", e.name,
@@ -1297,6 +1908,13 @@ void func_0004A300(ppu_context* ctx) { dispatch(ctx, s_fn[14]); }
 void func_0004A118(ppu_context* ctx) { dispatch(ctx, s_fn[15]); }
 void func_0004E100(ppu_context* ctx) { dispatch(ctx, s_fn[16]); }
 void func_0004EE80(ppu_context* ctx) { dispatch(ctx, s_fn[17]); }
+void func_0002C7D8(ppu_context* ctx) { dispatch(ctx, s_fn[18]); }
+void func_00031DC8(ppu_context* ctx) { dispatch(ctx, s_fn[19]); }
+void func_0002F56C(ppu_context* ctx) { dispatch(ctx, s_fn[20]); }
+void func_00030790(ppu_context* ctx) { dispatch(ctx, s_fn[21]); }
+void func_00030DF0(ppu_context* ctx) { dispatch(ctx, s_fn[22]); }
+void func_00031024(ppu_context* ctx) { dispatch(ctx, s_fn[23]); }
+void func_000207C0(ppu_context* ctx) { dispatch(ctx, s_fn[24]); }
 
 /* ---- 0x002909C0: end-of-frame wait --------------------------------------------
  * The title waits here for the flag at r3 + 0x2C, which its user-command
