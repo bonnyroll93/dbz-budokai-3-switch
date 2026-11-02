@@ -384,7 +384,7 @@ uint64_t g_step_acc = 0;
  * below kPaceUpUs, back to 30 Hz when it averages above kPaceDownUs; after a
  * drop, 60 Hz is not tried again for kPaceHoldFrames images.
  */
-constexpr double kPaceUpUs = 14500.0;   /* run100: 15500 flipped 30/60 every ~4 s */
+constexpr double kPaceUpUs = 15500.0;   /* run100: flipped every ~4 s at 15500 (renderer-bound then); back to 15500 after the 3 frame sets (run113) */
 constexpr double kPaceDownUs = 16700.0;
 constexpr uint32_t kPaceHoldFrames = 120;
 uint64_t g_pace_target = 0;      /* ticks of the current slot */

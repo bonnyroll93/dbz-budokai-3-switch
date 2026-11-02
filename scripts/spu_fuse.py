@@ -133,6 +133,7 @@ def main():
         for a in g:
             member_of[a] = g
 
+    profiled = any('SPU_PROFILE_SCOPE(' in l for l in lines)
     out = []
     i = 0
     emitted = set()
@@ -149,6 +150,11 @@ def main():
                 # met in the file (all members are defined in this file).
                 out.append(f'void {fused}(spu_context* ctx);')
                 out.append(f'void {fused}(spu_context* ctx) {{')
+                if profiled:
+                    # One restoring scope, before the switch: the members'
+                    # own scopes become plain stamps, since a goto may enter
+                    # a member past its declaration (run116 crash).
+                    out.append('    SPU_PROFILE_SCOPE(ctx->image_id, (uint32_t)ctx->pc);')
                 out.append('        switch ((uint32_t)ctx->pc) {')
                 for b in g:
                     out.append(f'        case 0x{b:X}: goto fz_{b:08X};')
@@ -158,6 +164,7 @@ def main():
                     bs, be = funcs[b]
                     out.append(f'fz_{b:08X}:')
                     for line in lines[bs + 1:be]:
+                        line = line.replace('SPU_PROFILE_SCOPE(', 'SPU_PROFILE_STAMP(')
                         line = TRAMP_RE.sub(
                             lambda t: (f'{{ goto fz_{int(t.group(3), 16):08X}; }}'
                                        if t.group(2) == prefix and int(t.group(3), 16) in g

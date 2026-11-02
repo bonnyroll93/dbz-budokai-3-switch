@@ -561,8 +561,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
             endif()
         endif()
     endif()
-    # T33 test: run the DBZ3 bnusCore audio SPU at the lowest host priority.
-    option(PORT_SWITCH_AUDIO_SPU_LOWPRIO "Lowest host priority for the bnusCore audio SPU" OFF)
+    # T33: the DBZ3 bnusCore audio SPU at the lowest host priority. It burns a
+    # whole core and could preempt the game thread on its pinned core 0; run118:
+    # heavy duel 7% -> 79% of the time at 60 Hz, audio misses unchanged.
+    option(PORT_SWITCH_AUDIO_SPU_LOWPRIO "Lowest host priority for the bnusCore audio SPU" ON)
     if(PORT_SWITCH_AUDIO_SPU_LOWPRIO)
         set_property(SOURCE stubs.cpp APPEND PROPERTY COMPILE_DEFINITIONS PORT_AUDIO_SPU_LOWPRIO=1)
         message(STATUS "Audio SPU low priority: ON")

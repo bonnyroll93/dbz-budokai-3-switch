@@ -41,6 +41,10 @@ static inline void ps3_spu_profile_leave(Ps3SpuProfileScope *scope)
 #define SPU_PROFILE_SCOPE(image, pc) \
     Ps3SpuProfileScope spu_profile_scope __attribute__((cleanup(ps3_spu_profile_leave))) = \
         ps3_spu_profile_enter((image), (pc))
+/* Stamp only, no restore: the members of a fused SPU function (spu_fuse.py),
+ * which a goto may enter past a declaration. The fused function's own scope,
+ * before its dispatch switch, restores on exit (run116 crash). */
+#define SPU_PROFILE_STAMP(image, pc) ((void)ps3_spu_profile_enter((image), (pc)))
 #ifdef __cplusplus
 }
 #endif
