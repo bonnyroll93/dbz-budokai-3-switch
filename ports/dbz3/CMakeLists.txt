@@ -374,7 +374,7 @@ add_executable(${PROJECT_NAME}
     ${SPU_SOURCES}
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
-    target_sources(${PROJECT_NAME} PRIVATE switch_app.c)
+    target_sources(${PROJECT_NAME} PRIVATE switch_app.c dbz3_savedata.c)
     if(_dbz3_wtrack)
         target_sources(${PROJECT_NAME} PRIVATE dbz3_wtrack.cpp)
     endif()

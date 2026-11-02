@@ -46,6 +46,7 @@
 *.bin
 *.png
 *.jpg
+!/icon.jpg
 *.jpeg
 *.hlsl
 !/shaders/

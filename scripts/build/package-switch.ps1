@@ -36,7 +36,10 @@ $elf2nso = Join-Path $DevkitPro 'tools\bin\elf2nso.exe'
 $npdmtool = Join-Path $DevkitPro 'tools\bin\npdmtool.exe'
 $nacptool = Join-Path $DevkitPro 'tools\bin\nacptool.exe'
 $config = Join-Path $project 'ports\dbz3\runner.json'
-$icon = Join-Path $project $g.Icon
+# icon.jpg in the project root (committed) wins over the generated one.
+$icon = Join-Path $project 'icon.jpg'
+if (-not (Test-Path -LiteralPath $icon -PathType Leaf)) { $icon = Join-Path $project $g.Icon }
+Write-Host "Icon: $icon"
 foreach ($required in @($elf, $elf2nso, $npdmtool, $nacptool, $config, $icon)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Missing input: $required"
@@ -101,10 +104,38 @@ if ($npdm.Length -lt 0x18 -or [Text.Encoding]::ASCII.GetString($npdm, 0, 4) -ne 
         [BitConverter]::ToUInt32($npdm, 0x14) -ne 0x04000000) {
     throw 'Runner NPDM is missing its 64 MiB SystemResource reservation'
 }
+# The HOME menu only reads a baseline JPEG of 256x256: a progressive JPEG (SOF2)
+# made the NSP fail to install. Check the frame header before packaging.
+$iconBytes = [IO.File]::ReadAllBytes($icon)
+$sof = $null
+for ($i = 2; $i -lt $iconBytes.Length - 9; ) {
+    if ($iconBytes[$i] -ne 0xFF) { $i++; continue }
+    $m = $iconBytes[$i + 1]
+    if ($m -ge 0xC0 -and $m -le 0xC2) { $sof = $i; break }
+    if ($m -eq 0xD8 -or ($m -ge 0xD0 -and $m -le 0xD7)) { $i += 2; continue }
+    $i += 2 + ($iconBytes[$i + 2] * 256 + $iconBytes[$i + 3])
+}
+if ($null -eq $sof -or $iconBytes[$sof + 1] -ne 0xC0 -or
+        ($iconBytes[$sof + 5] * 256 + $iconBytes[$sof + 6]) -ne 256 -or
+        ($iconBytes[$sof + 7] * 256 + $iconBytes[$sof + 8]) -ne 256) {
+    throw "Icon must be a baseline (not progressive) 256x256 JPEG: $icon"
+}
 Copy-Item -LiteralPath $icon -Destination (Join-Path $control 'icon_AmericanEnglish.dat')
 & $nacptool --create $appName 'dbz-budokai-3-switch' $DisplayVersion `
     (Join-Path $control 'control.nacp') "--titleid=$titleId"
 if ($LASTEXITCODE -ne 0) { throw 'nacptool failed' }
+# Switch save data (dbz3_savedata.c): the user is chosen at launch, as for
+# installed games, and the save is owned by this title. NACP offsets:
+# 0x3025 StartupUserAccount, 0x3078 SaveDataOwnerId,
+# 0x3080 UserAccountSaveDataSize, 0x3088 UserAccountSaveDataJournalSize.
+$nacpPath = Join-Path $control 'control.nacp'
+$nacp = [IO.File]::ReadAllBytes($nacpPath)
+if ($nacp.Length -ne 0x4000) { throw "Unexpected control.nacp size $($nacp.Length)" }
+$nacp[0x3025] = 1
+[BitConverter]::GetBytes([Convert]::ToUInt64($titleId, 16)).CopyTo($nacp, 0x3078)
+[BitConverter]::GetBytes([UInt64](32MB)).CopyTo($nacp, 0x3080)
+[BitConverter]::GetBytes([UInt64](16MB)).CopyTo($nacp, 0x3088)
+[IO.File]::WriteAllBytes($nacpPath, $nacp)
 $packerArgs = @('-k', $keys, '--titleid', $titleId, '--exefsdir', $exefs,
     '--controldir', $control, '--nspdir', $package, '--ncadir', $ncas,
     '--tempdir', $temporary, '--backupdir', $backup, '--nologo', '--keepncadir')
