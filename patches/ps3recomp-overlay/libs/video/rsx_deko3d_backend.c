@@ -2797,7 +2797,10 @@ int rsx_deko3d_backend_init(uint32_t width, uint32_t height, const char* title)
 
     /* One path at a time: the engine only. The rsx_state vtable keeps
      * tracking state with no backend registered, as on the Vulkan path. */
-    rsx_draw_engine_set_backend(&s_dk_engine_backend);
+    /* Deferred draw backend (rsx_mt_backend.c): records the engine's calls and
+     * replays them on this backend; render-mt-off on the SD bypasses it. */
+    { extern const rsx_draw_backend* rsx_mt_backend_wrap(const rsx_draw_backend* real);
+      rsx_draw_engine_set_backend(rsx_mt_backend_wrap(&s_dk_engine_backend)); }
     rsx_draw_engine_set_default(1);
     if (!rsx_draw_engine_enabled() || rsx_draw_engine_init(width, height) != 0) {
         dk_log("init FAILED: the draw engine did not come up "

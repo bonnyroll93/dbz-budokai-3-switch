@@ -470,7 +470,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
                 message(STATUS "DBZ3 native draw-state functions: ON")
             endif()
             # Native-A step 2c: mesh draw bodies (harness and undo-log self-test).
-            option(PORT_DBZ3_NATIVE_MESH "Mesh draw bodies harness (guest 0x0001AA00, 0x000328A8)" ON)
+            option(PORT_DBZ3_NATIVE_MESH "Mesh draw bodies harness (guest 0x0001AA00, 0x000328A8); no gain (run83-86), off" OFF)
             if(PORT_DBZ3_NATIVE_MESH AND PORT_DBZ3_NATIVE_MATERIAL)
                 set(_mesh_fast "${CMAKE_CURRENT_BINARY_DIR}/native-inc/dbz3_mesh_fast.inc")
                 add_custom_command(OUTPUT "${_mesh_fast}"

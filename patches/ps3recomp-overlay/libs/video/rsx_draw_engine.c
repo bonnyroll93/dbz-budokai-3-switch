@@ -2130,10 +2130,37 @@ static u64 eng_vc_entry_bytes(const eng_vc_entry* e)
            (u64)e->n_cuts * 4u;
 }
 
+/* Vertex arrays of evicted cache entries are freed 8 presents later: a
+ * deferred draw backend (rsx_mt_backend.c) replays draws a frame or two
+ * behind and reads cached vertices in place instead of copying them. */
+#define ENG_VC_GRAVE 4096u
+static struct { u8* p; u32 frame; } s_vc_grave[ENG_VC_GRAVE];
+static u32 s_vc_grave_head, s_vc_grave_n;
+static void eng_vc_grave_collect(u32 frame)
+{
+    while (s_vc_grave_n) {
+        const u32 i = s_vc_grave_head;
+        if (frame - s_vc_grave[i].frame < 8u) break;
+        free(s_vc_grave[i].p);
+        s_vc_grave_head = (i + 1u) % ENG_VC_GRAVE;
+        s_vc_grave_n--;
+    }
+}
 static void eng_vc_free(eng_vc_entry* e)
 {
     s_vc_bytes -= eng_vc_entry_bytes(e);
-    free(e->verts); free(e->occ); free(e->cuts);
+    if (e->verts) {
+        if (s_vc_grave_n == ENG_VC_GRAVE) {          /* full: the oldest goes now */
+            free(s_vc_grave[s_vc_grave_head].p);
+            s_vc_grave_head = (s_vc_grave_head + 1u) % ENG_VC_GRAVE;
+            s_vc_grave_n--;
+        }
+        const u32 i = (s_vc_grave_head + s_vc_grave_n) % ENG_VC_GRAVE;
+        s_vc_grave[i].p = e->verts;
+        s_vc_grave[i].frame = g.frames;
+        s_vc_grave_n++;
+    }
+    free(e->occ); free(e->cuts);
     memset(e, 0, sizeof(*e));
 }
 
@@ -3593,6 +3620,10 @@ static void sink_end(void* user, const rsx_dispatch* r)
 
     const u32 uploaded = indexed ? dc.n_verts : n_draw;
     ENG_SEC(5);
+    /* Cached vertices stay valid for 8 presents after eviction (eng_vc_free):
+     * a deferred backend may read them in place. */
+    { extern int g_rsx_mt_verts_stable;
+      g_rsx_mt_verts_stable = dc.verts_view != dc.verts; }
     g.be->draw(g.be->user, topology, dc.verts_view, uploaded, layout.stride,
                indexed ? g.indices : NULL, indexed ? n_draw : 0);
 #ifdef __SWITCH__
@@ -3718,6 +3749,7 @@ static void eng_present(u32 buffer_id)
     draw_capture_arm();
 #endif
     eng_textures_sweep();
+    eng_vc_grave_collect(g.frames);
     g.last_guest_draws = g.guest_draws;
     g.guest_draws = 0;
 }
