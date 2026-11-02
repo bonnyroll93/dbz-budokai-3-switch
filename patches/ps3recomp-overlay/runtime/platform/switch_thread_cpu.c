@@ -32,6 +32,9 @@ uint64_t ps3_switch_thread_cpu_ns_for(uint32_t handle)
 /* T33: SPU thread group to run at the lowest host priority (lv2_register.c);
  * set by a port, NULL = none. */
 const char* g_spu_lowprio_group = NULL;
+/* Host priority given to that group's threads (0x3F = lowest; Switch default
+ * is 0x2C, lower numbers run first). */
+int g_spu_lowprio_value = 0x3F;
 
 int ps3_switch_set_current_thread_priority(int prio)
 {

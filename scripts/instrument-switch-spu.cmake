@@ -3,8 +3,15 @@ file(READ "${INPUT}" source)
 get_filename_component(source_dir "${INPUT}" DIRECTORY)
 get_filename_component(output_dir "${OUTPUT}" DIRECTORY)
 file(RELATIVE_PATH header_path "${output_dir}" "${source_dir}/spu_recomp.h")
-string(REPLACE "#include \"spu_recomp.h\""
-    "#include \"${header_path}\"\n#include \"spu_profile.h\"" source "${source}")
+if(source MATCHES "#include \"spu_recomp.h\"")
+    string(REPLACE "#include \"spu_recomp.h\""
+        "#include \"${header_path}\"\n#include \"spu_profile.h\"" source "${source}")
+else()
+    # A patched copy (spu_patch_dbz3_audio.py) already names the header by
+    # its full path: keep that include and add the profiler header after it.
+    string(REGEX REPLACE "(#include \"[^\"]*spu_recomp[.]h\")"
+        "\\1\n#include \"spu_profile.h\"" source "${source}")
+endif()
 set(pattern "void ([A-Za-z0-9_]+)_spu_func_([0-9A-Fa-f]+)\\(spu_context\\* ctx\\) \\{")
 string(REGEX MATCHALL "${pattern}" entries "${source}")
 list(LENGTH entries count)

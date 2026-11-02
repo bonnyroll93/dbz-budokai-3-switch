@@ -23,6 +23,7 @@ extern "C" int _cellSpursLFQueuePushBody(unsigned long long, unsigned long long,
 extern "C" int g_cellAudioOut_max_channels;   /* libs/misc/cellAvconfExt.c */
 #if defined(__SWITCH__) && defined(PORT_AUDIO_SPU_LOWPRIO)
 extern "C" const char* g_spu_lowprio_group;   /* runtime/platform/switch_thread_cpu.c */
+extern "C" int g_spu_lowprio_value;
 #endif
 
 /* T-A1: DBZ3 bnusCore reverb bypass (scripts/spu_patch_dbz3_audio.py). The
@@ -50,10 +51,22 @@ extern "C" void ps3_blus_register_hle_overrides(void)
      * SPU still writes ~43 of 187.5 blocks a second. Left at the default. */
     g_cellAudioOut_max_channels = 0;
 #if defined(__SWITCH__) && defined(PORT_AUDIO_SPU_LOWPRIO)
-    /* T33 test: the bnusCore audio SPU at the lowest host priority, so the game
-     * and the renderer always win a contended core. Audio stays as partial as
-     * it is (that SPU cannot keep up regardless); the question is the FPS. */
+    /* T33: host priority of the bnusCore audio SPU, chosen on the SD for A/B.
+     * run119: with the reverb skipped it uses only ~12-27% of a core and
+     * mostly waits on the PPU, so a late wake-up may be what drops audio
+     * blocks. Default lowest; bnus-prio-normal = 0x2C (the Switch default),
+     * bnus-prio-high = 0x28 (lower numbers run first). */
     g_spu_lowprio_group = "bnusCore";
+    {
+        int prio = 0x3F;
+        const char* which = "lowest (default)";
+        FILE* f = fopen("sdmc:/switch/dbz-budokai-3-switch/bnus-prio-normal", "r");
+        if (f) { prio = 0x2C; which = "normal (bnus-prio-normal)"; fclose(f); }
+        f = fopen("sdmc:/switch/dbz-budokai-3-switch/bnus-prio-high", "r");
+        if (f) { prio = 0x28; which = "high (bnus-prio-high)"; fclose(f); }
+        g_spu_lowprio_value = prio;
+        fprintf(stderr, "[t33] bnusCore host priority: %s\n", which);
+    }
 #endif
 
     /* The generated import table does not register this BLUS SPURS export. */

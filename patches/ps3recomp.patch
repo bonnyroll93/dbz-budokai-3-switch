@@ -83,7 +83,7 @@ index 94de794..9cbeb9e 100644
      target_include_directories(ps3recomp_runtime PRIVATE "${PS3RECOMP_VULKAN_INCLUDE_DIR}")
      # PUBLIC: ps3recomp_host selects its backend on this definition.
 diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
-index b51fb7c..42a4aec 100644
+index b51fb7c..2945598 100644
 --- a/libs/audio/cellAudio.c
 +++ b/libs/audio/cellAudio.c
 @@ -34,7 +34,13 @@ extern uint32_t sys_event_queue_create_direct(uint64_t key, int32_t size);
@@ -333,7 +333,18 @@ index b51fb7c..42a4aec 100644
  
          /* Keep the monotonic counter for tags/timestamps, but publish the
           * ring slot to the guest. SurMixer multiplies this value by the block
-@@ -528,9 +712,14 @@ static void audio_notify_event_queues(void)
+@@ -519,6 +703,10 @@ static void audio_mix_one_block(void)
+  * Mixing thread
+  * -----------------------------------------------------------------------*/
+ 
++/* Notify pushes per 5 s window that failed (queue full or gone) and that
++ * went through, reported in t23-audio.log: a failed push is a block the game
++ * is never told to write. */
++static unsigned s_notify_fail, s_notify_ok;
+ static void audio_notify_event_queues(void)
+ {
+     /* Push the audio-period event (data1 = CELL_AUDIO_EVENT_MIX = 0) to each
+@@ -528,9 +716,15 @@ static void audio_notify_event_queues(void)
      for (int i = 0; i < CELL_AUDIO_MAX_NOTIFY_EVENT_QUEUES; i++) {
          if (!s_notify_queues[i].in_use) continue;
          uint32_t qid = sys_event_find_queue_by_key(s_notify_queues[i].key);
@@ -342,6 +353,7 @@ index b51fb7c..42a4aec 100644
 -                                       0 /*CELL_AUDIO_EVENT_MIX*/, 0, 0);
 +        int rc = qid ? sys_event_queue_push_by_id(qid, s_notify_queues[i].key,
 +                                                  0 /*CELL_AUDIO_EVENT_MIX*/, 0, 0) : -1;
++        if (rc != 0) s_notify_fail++; else s_notify_ok++;
 +#ifdef __SWITCH__
 +        static unsigned notify_trace_count;
 +        if (notify_trace_count++ < 8)
@@ -351,7 +363,7 @@ index b51fb7c..42a4aec 100644
      }
  }
  
-@@ -607,18 +796,68 @@ static void* audio_mix_thread_func(void* arg)
+@@ -607,18 +801,69 @@ static void* audio_mix_thread_func(void* arg)
  {
      (void)arg;
      printf("[cellAudio] Mixing thread started\n");
@@ -379,9 +391,10 @@ index b51fb7c..42a4aec 100644
 +          unsigned long long now = (unsigned long long)ts.tv_sec * 1000ull + ts.tv_nsec / 1000000ull;
 +          if (!t0) t0 = now;
 +          if (lf && now - t0 >= 5000) {
-+              fprintf(lf, "blocks/s=%.1f silent=%.0f%% peak=%.4f dropped=%llu\n",
++              fprintf(lf, "blocks/s=%.1f silent=%.0f%% peak=%.4f dropped=%llu notify_ok=%u notify_fail=%u\n",
 +                      n * 1000.0 / (double)(now - t0), n ? 100.0 * z / n : 0.0, pk,
-+                      (unsigned long long)g_audio_dropped);
++                      (unsigned long long)g_audio_dropped, s_notify_ok, s_notify_fail);
++              s_notify_ok = s_notify_fail = 0;
 +              for (int p = 0; p < CELL_AUDIO_PORT_MAX; p++) {
 +                  AudioPortSlot* port = &s_ports[p];
 +                  if (!port->in_use || !port->buffer) continue;
@@ -420,7 +433,7 @@ index b51fb7c..42a4aec 100644
      }
  
      printf("[cellAudio] Mixing thread stopped\n");
-@@ -808,6 +1047,10 @@ s32 cellAudioPortOpen(const CellAudioPortParam* param, u32* portNum)
+@@ -808,6 +1053,10 @@ s32 cellAudioPortOpen(const CellAudioPortParam* param, u32* portNum)
  
      port->buffer = (float*)(vm_base + guest_buf);     /* host view of guest buffer */
      memset(port->buffer, 0, port->buf_size);
@@ -13247,7 +13260,7 @@ index 6a19d5b..c8e7d55 100644
      /* Same 256 MB reservation, for the same reason: pthread stacks are
       * mmap'd and committed on touch, so this reserves address space rather
 diff --git a/runtime/syscalls/lv2_register.c b/runtime/syscalls/lv2_register.c
-index bcb1df4..a71dbcb 100644
+index bcb1df4..f6b2b67 100644
 --- a/runtime/syscalls/lv2_register.c
 +++ b/runtime/syscalls/lv2_register.c
 @@ -295,6 +295,8 @@ typedef struct {
@@ -13319,7 +13332,7 @@ index bcb1df4..a71dbcb 100644
  
      /* EXPERIMENT (YDKJ_SPUREADY): the lifted libsre cellSpursInitialize busy-polls the
       * SPU-thread descriptor field at img_ea+0x38 (e.g. 0x101671A8) for a non-zero
-@@ -713,6 +742,26 @@ static void* spu_exec_thread_proc(void* arg)
+@@ -713,6 +742,27 @@ static void* spu_exec_thread_proc(void* arg)
      { ULONG g = 256 * 1024; SetThreadStackGuarantee(&g); }  /* let SO reach the reporter */
  #endif
      spu_thread_t* t = (spu_thread_t*)arg;
@@ -13332,21 +13345,22 @@ index bcb1df4..a71dbcb 100644
 +         * renderer leave idle (DBZ3: the bnusCore audio SPU, which burns a
 +         * whole core and cannot keep up anyway). NULL = off. */
 +        extern const char* g_spu_lowprio_group;
++        extern int g_spu_lowprio_value;   /* switch_thread_cpu.c, 0x3F unless a port sets it */
 +        spu_group_t* sg = spu_find_group(t->group_id);
 +        char nm[40];
 +        snprintf(nm, sizeof nm, "spu:%s", sg ? sg->name : "?");
 +        ps3_thread_stats_register("spu", nm);
 +        if (g_spu_lowprio_group && sg && !strcmp(sg->name, g_spu_lowprio_group)) {
-+            const int ok = ps3_switch_set_current_thread_priority(0x3F);
-+            fprintf(stderr, "[t33] SPU group \"%s\" thread -> lowest host priority (%s)\n",
-+                    sg->name, ok ? "ok" : "FAILED");
++            const int ok = ps3_switch_set_current_thread_priority(g_spu_lowprio_value);
++            fprintf(stderr, "[t33] SPU group \"%s\" thread -> host priority 0x%X (%s)\n",
++                    sg->name, g_spu_lowprio_value, ok ? "ok" : "FAILED");
 +        }
 +    }
 +#endif
      spu_lifted_thread_result r;
      spu_lifted_thread_run(t->sctx, &r);
      t->exit_status = r.exit_status;
-@@ -787,12 +836,12 @@ static void* spu_fallback_thread_proc(void* arg)
+@@ -787,12 +837,12 @@ static void* spu_fallback_thread_proc(void* arg)
   * (type 1) are memcpy'd from their guest source EA; FILL segments (type 2) are
   * zeroed. Mirrors sys_spu_image_import's segment layout {type,ls_start,size,
   * src(pa64)} (0x18 bytes each). Returns the entry point, or 0 on failure. */
@@ -13364,7 +13378,7 @@ index bcb1df4..a71dbcb 100644
      for (uint32_t s = 0; s < nsegs && s < 64; s++) {
          uint32_t b        = segs + s * 0x18;
          uint32_t type     = vm_read_be32(b + 0x00);
-@@ -825,7 +874,7 @@ static int32_t spu_interp_fallback(uint32_t tid, uint32_t args_ea,
+@@ -825,7 +875,7 @@ static int32_t spu_interp_fallback(uint32_t tid, uint32_t args_ea,
      if (!t) return -1;
      uint8_t* ls = spu_thread_get_or_alloc_ls(t);
      if (!ls) return -1;
@@ -13373,7 +13387,7 @@ index bcb1df4..a71dbcb 100644
      if (getenv("SPU_ARGS_DUMP") && vm_base && args_ea) {
          fprintf(stderr, "[SPU-ARGS] tid=0x%X args@0x%08X:", tid, args_ea);
          for (int i = 0; i < 8; i++) fprintf(stderr, " %08X", vm_read_be32(args_ea + i*4));
-@@ -867,7 +916,7 @@ int spu_dispatch_frame_by_queue(uint32_t comp_queue, uint32_t work_ea)
+@@ -867,7 +917,7 @@ int spu_dispatch_frame_by_queue(uint32_t comp_queue, uint32_t work_ea)
          if (!t->in_use || t->connected_queue != comp_queue || !t->img_ea) continue;
          uint8_t* ls = spu_thread_get_or_alloc_ls(t);
          if (!ls) return 0;
@@ -13382,7 +13396,7 @@ index bcb1df4..a71dbcb 100644
          fprintf(stderr, "[SPU-FRAME] tid=0x%X q=%u work=0x%08X -> re-run\n",
                  t->tid, comp_queue, work_ea);
          /* Seed the inbound mailbox with the work descriptor when we HAVE one.
-@@ -1012,6 +1061,8 @@ static int64_t sys_spu_thread_group_start_handler(ppu_context* ctx)
+@@ -1012,6 +1062,8 @@ static int64_t sys_spu_thread_group_start_handler(ppu_context* ctx)
                  d.group_id = id;
                  d.entry    = t->entry_point;
                  d.img_ea   = t->img_ea;
@@ -13391,7 +13405,7 @@ index bcb1df4..a71dbcb 100644
                  for (int a = 0; a < 4; a++) d.args[a] = t->args[a];
                  spu_lifted_thread_setup(t->sctx, &d);
                  t->running = 1;
-@@ -1640,8 +1691,19 @@ static int spu_deliver_user_event(spu_context* spu, uint32_t value)
+@@ -1640,8 +1692,19 @@ static int spu_deliver_user_event(spu_context* spu, uint32_t value)
              queue = spurs_port_queue(port);
          } else {
              AcquireSRWLockShared(&s_spu_port_lock);
@@ -13412,7 +13426,7 @@ index bcb1df4..a71dbcb 100644
              ReleaseSRWLockShared(&s_spu_port_lock);
          }
          result = CELL_ENOTCONN;
-@@ -1650,6 +1712,17 @@ static int spu_deliver_user_event(spu_context* spu, uint32_t value)
+@@ -1650,6 +1713,17 @@ static int spu_deliver_user_event(spu_context* spu, uint32_t value)
                  spu->spu_id, ((uint64_t)port << 32) | (value & 0xFFFFFFu), data);
              result = rc == 0 ? CELL_OK : CELL_EBUSY;
          }
@@ -13430,7 +13444,7 @@ index bcb1df4..a71dbcb 100644
      }
      if (code < 64) spu_channel_write(&spu->ch_in_mbox, result);
      return 1;
-@@ -1679,6 +1752,7 @@ static int64_t sys_spu_thread_connect_event_handler(ppu_context* ctx)
+@@ -1679,6 +1753,7 @@ static int64_t sys_spu_thread_connect_event_handler(ppu_context* ctx)
      spu_thread_t* t = spu_find_thread(tid);
      uint32_t spup = (uint32_t)ctx->gpr[6];
      if (t) {
@@ -13438,7 +13452,7 @@ index bcb1df4..a71dbcb 100644
          /* First binding stays the default for anything we cannot port-route. */
          if (!t->connected_queue) { t->connected_queue = eq; t->connect_spup = spup; }
          int slot = -1;
-@@ -1686,6 +1760,7 @@ static int64_t sys_spu_thread_connect_event_handler(ppu_context* ctx)
+@@ -1686,6 +1761,7 @@ static int64_t sys_spu_thread_connect_event_handler(ppu_context* ctx)
              if (t->evt_bind[i].spup == spup) { slot = i; break; }
          if (slot < 0 && t->evt_bind_n < 8) slot = t->evt_bind_n++;
          if (slot >= 0) { t->evt_bind[slot].spup = spup; t->evt_bind[slot].queue = eq; }
@@ -13446,7 +13460,7 @@ index bcb1df4..a71dbcb 100644
      }
      fprintf(stderr, "[SPU] thread_connect_event tid=0x%X queue=0x%X et=0x%X spup=0x%X%s\n",
              tid, eq, et, (uint32_t)ctx->gpr[6], t ? "" : " (thread not found)");
-@@ -2385,6 +2460,100 @@ static int64_t sys_spu_thread_stub(ppu_context* ctx)
+@@ -2385,6 +2461,100 @@ static int64_t sys_spu_thread_stub(ppu_context* ctx)
      return 0;
  }
  
@@ -13547,7 +13561,7 @@ index bcb1df4..a71dbcb 100644
  
  
  /* sys_usbd_receive_event (540) -- a BLOCKING receive, not a poll.
-@@ -2526,8 +2695,10 @@ void lv2_register_all_syscalls(lv2_syscall_table* tbl)
+@@ -2526,8 +2696,10 @@ void lv2_register_all_syscalls(lv2_syscall_table* tbl)
      lv2_syscall_register(tbl, SYS_SPU_THREAD_SET_SPU_CFG,    sys_spu_thread_set_spu_cfg_handler);
      lv2_syscall_register(tbl, SYS_SPU_THREAD_GET_SPU_CFG,    sys_spu_thread_get_spu_cfg_handler);
      lv2_syscall_register(tbl, SYS_SPU_THREAD_WRITE_SPU_MB,  sys_spu_thread_write_spu_mb_handler);

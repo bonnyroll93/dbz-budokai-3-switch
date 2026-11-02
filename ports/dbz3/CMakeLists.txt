@@ -308,10 +308,13 @@ if(PORT_ENABLE_SPU)
             endif()
             if(_spu_profile_on)
                 set(profile_copy "${CMAKE_CURRENT_BINARY_DIR}/spu-profile/${image_name}.c")
+                # Instrument the copy built so far (the reverb bypass included):
+                # instrumenting ${lift} dropped the patch (run117 profiled the
+                # reverb the normal build skips).
                 add_custom_command(OUTPUT "${profile_copy}"
-                    COMMAND ${CMAKE_COMMAND} "-DINPUT=${lift}" "-DOUTPUT=${profile_copy}"
+                    COMMAND ${CMAKE_COMMAND} "-DINPUT=${spu_src}" "-DOUTPUT=${profile_copy}"
                         -P "${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/instrument-switch-spu.cmake"
-                    DEPENDS "${lift}" "${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/instrument-switch-spu.cmake"
+                    DEPENDS "${spu_src}" "${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/instrument-switch-spu.cmake"
                     VERBATIM)
                 set(spu_src "${profile_copy}")
             endif()
