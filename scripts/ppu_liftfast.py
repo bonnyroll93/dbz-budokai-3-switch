@@ -127,6 +127,10 @@ def main():
                             '        dbz3_level30790_scope dbz3_level30790_timer;\n'
                             '#endif\n', 1)
 
+    # Vector stores go through lf_vstore (a memcpy, plus the store hook of the
+    # diagnostic PORT_DBZ3_WTRACK build).
+    text = text.replace('memcpy(vm_base + (uint32_t)ea,', 'lf_vstore(vm_base + (uint32_t)ea,')
+
     if INCLUDE in text:
         text = text.replace(INCLUDE, INCLUDE + '\n#include "dbz3_liftfast.h"\nextern "C" void dbz3_du_phase_probe(uint32_t);\nextern "C" int dbz3_du_skip_render(void);', 1)
     else:

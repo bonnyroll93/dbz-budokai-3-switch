@@ -92,6 +92,7 @@ option(PORT_SWITCH_PPU_REGCACHE_ALL "Lifted PPU regcache: also rewrite functions
 set(PPU_TU000 "${RECOMP_DIR}/ppu_recomp_000.cpp")
 set(PPU_TU004 "${RECOMP_DIR}/ppu_recomp_004.cpp")
 set(PPU_TU003 "${RECOMP_DIR}/ppu_recomp_003.cpp")
+set(PPU_TU005 "${RECOMP_DIR}/ppu_recomp_005.cpp")
 if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" AND
    (PORT_SWITCH_PPU_FUNC_PROFILE OR PORT_SWITCH_PPU_VECNEON OR PORT_SWITCH_PPU_LIFTFAST OR
     PORT_SWITCH_PPU_REGCACHE))
@@ -164,6 +165,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" AND
         endif()
         if(src_name STREQUAL "ppu_recomp_003.cpp")
             set(PPU_TU003 "${cur}")
+        endif()
+        if(src_name STREQUAL "ppu_recomp_005.cpp")
+            set(PPU_TU005 "${cur}")
         endif()
     endforeach()
     set(RECOMP_SOURCES ${_ppu_new_sources})
@@ -462,6 +466,48 @@ if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
                 set(_dbz3_native_draw ON)
                 message(STATUS "DBZ3 native draw-state functions: ON")
             endif()
+            # Native-A step 2c: mesh draw bodies (harness and undo-log self-test).
+            option(PORT_DBZ3_NATIVE_MESH "Mesh draw bodies harness (guest 0x0001AA00, 0x000328A8)" ON)
+            if(PORT_DBZ3_NATIVE_MESH AND PORT_DBZ3_NATIVE_MATERIAL)
+                set(_mesh_fast "${CMAKE_CURRENT_BINARY_DIR}/native-inc/dbz3_mesh_fast.inc")
+                add_custom_command(OUTPUT "${_mesh_fast}"
+                    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/native-inc"
+                    COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/../../.venv/Scripts/python.exe" -I
+                            "${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/ppu_mesh_fast.py"
+                            "${RECOMP_DIR}/ppu_recomp_000.cpp" "${_mesh_fast}" "0001AA00,000328A8"
+                    DEPENDS "${RECOMP_DIR}/ppu_recomp_000.cpp"
+                            "${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/ppu_mesh_fast.py"
+                            "${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/ppu_regcache.py"
+                            "${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/ppu_vecneon.py" VERBATIM)
+                target_sources(${PROJECT_NAME} PRIVATE dbz3_native_mesh.cpp "${_mesh_fast}")
+                set_property(SOURCE dbz3_native_mesh.cpp APPEND PROPERTY COMPILE_OPTIONS "-ffp-contract=off;-w")
+                set_property(SOURCE dbz3_native_mesh.cpp APPEND PROPERTY
+                    INCLUDE_DIRECTORIES "${CMAKE_CURRENT_BINARY_DIR}/native-inc")
+                set_property(SOURCE dbz3_native_mesh.cpp APPEND PROPERTY
+                    OBJECT_DEPENDS "${_prelude};${_mesh_fast}")
+                set(_dbz3_native_mesh ON)
+                message(STATUS "DBZ3 mesh bodies harness: ON")
+            endif()
+            # Hot math: libm sinf/cosf kernel and the quaternion matrix multiply.
+            option(PORT_DBZ3_NATIVE_MATH "Native sin/cos kernel and matrix multiply (guest 0x002A733C, 0x000252B0)" ON)
+            if(PORT_DBZ3_NATIVE_MATH AND PORT_DBZ3_NATIVE_MATERIAL)
+                target_sources(${PROJECT_NAME} PRIVATE dbz3_native_math.cpp)
+                set_property(SOURCE dbz3_native_math.cpp APPEND PROPERTY
+                    COMPILE_OPTIONS "-ffp-contract=off;-w")
+                set_property(SOURCE dbz3_native_math.cpp APPEND PROPERTY
+                    INCLUDE_DIRECTORIES "${CMAKE_CURRENT_BINARY_DIR}/native-inc")
+                set_property(SOURCE dbz3_native_math.cpp APPEND PROPERTY
+                    OBJECT_DEPENDS "${_prelude}")
+                set(_dbz3_native_math ON)
+                message(STATUS "DBZ3 native math: ON")
+            endif()
+            # The diagnostic store tracker / undo log must also see the native
+            # replacements' stores.
+            if(PORT_DBZ3_WTRACK AND PORT_SWITCH_PPU_FUNC_PROFILE)
+                set_property(SOURCE dbz3_ppu_native.cpp dbz3_native_material.cpp dbz3_native_shader.cpp
+                             dbz3_native_draw.cpp dbz3_native_mesh.cpp dbz3_native_math.cpp
+                             APPEND PROPERTY COMPILE_DEFINITIONS DBZ3_WTRACK=1)
+            endif()
         endif()
         target_link_options(${PROJECT_NAME} PRIVATE "LINKER:--wrap=_Z13func_001FCAC4P11ppu_context")
         message(STATUS "DBZ3 gcm-const fast path: ON")
@@ -679,6 +725,17 @@ if(_dbz3_weak_overrides)
     endif()
     if(_dbz3_native_draw)
         set_property(SOURCE "${PPU_TU000}" APPEND PROPERTY COMPILE_DEFINITIONS DBZ3_NATIVE_DRAW=1)
+    endif()
+    if(_dbz3_native_mesh)
+        set_property(SOURCE "${PPU_TU000}" APPEND PROPERTY COMPILE_DEFINITIONS DBZ3_NATIVE_MESH=1)
+    endif()
+    if(_dbz3_native_math)
+        set_property(SOURCE "${PPU_TU000}" APPEND PROPERTY COMPILE_DEFINITIONS DBZ3_NATIVE_MATH_TU000=1)
+        set_property(SOURCE "${PPU_TU004}" APPEND PROPERTY COMPILE_DEFINITIONS DBZ3_NATIVE_MATH_TU004=1)
+        # cellGcmAddressToOffset import stub 0x002B6E00 lives in TU 005.
+        set_property(SOURCE "${PPU_TU005}" APPEND PROPERTY
+            COMPILE_OPTIONS "-include;${CMAKE_CURRENT_SOURCE_DIR}/dbz3_weak_overrides.h")
+        set_property(SOURCE "${PPU_TU005}" APPEND PROPERTY COMPILE_DEFINITIONS DBZ3_NATIVE_MATH_TU005=1)
     endif()
 endif()
 

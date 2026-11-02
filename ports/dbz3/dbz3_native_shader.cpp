@@ -20,6 +20,7 @@
  */
 #define PPU_FAST_VM 1
 #include "dbz3_lifted_prelude.inc"
+#include "dbz3_store_hook.h"
 
 #include <switch.h>
 #include <cstdarg>
@@ -34,7 +35,7 @@ namespace {
 inline uint8_t  r8(uint32_t a)  { return vm_base[a]; }
 inline uint16_t r16(uint32_t a) { uint16_t v; memcpy(&v, vm_base + a, 2); return __builtin_bswap16(v); }
 inline uint32_t r32(uint32_t a) { uint32_t v; memcpy(&v, vm_base + a, 4); return __builtin_bswap32(v); }
-inline void w32(uint32_t a, uint32_t v) { v = __builtin_bswap32(v); memcpy(vm_base + a, &v, 4); }
+inline void w32(uint32_t a, uint32_t v) { dbz3_store_hook(a, 4u); v = __builtin_bswap32(v); memcpy(vm_base + a, &v, 4); }
 
 const uint32_t kGcmCtxPtr = 0x005D5610u;   // CellGcmContextData*: begin, end, current, callback
 
@@ -80,10 +81,12 @@ bool set_vertex_program(uint32_t g, uint32_t prog, uint32_t ucode)
     uint32_t src = ucode;
     for (uint32_t b = 0; b < blocks; b++, src += 0x80u, cur += 0x84u) {
         w32(cur, 0x00800B80u);                            // 32 words of microcode
+        dbz3_store_hook(cur + 4u, 0x80u);
         memcpy(vm_base + cur + 4u, vm_base + src, 0x80u); // big-endian words, copied as is
     }
     if (rem) {
         w32(cur, ppc_rlwinm(rem, 18, 0, 13) | 0xB80u);
+        dbz3_store_hook(cur + 4u, rem * 4u);
         memcpy(vm_base + cur + 4u, vm_base + src, (size_t)rem * 4u);
         cur += 4u + rem * 4u;
     }

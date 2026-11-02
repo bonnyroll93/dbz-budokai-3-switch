@@ -55,15 +55,32 @@ void vm_write32(uint64_t, uint32_t);
 void vm_write64(uint64_t, uint64_t);
 }
 
-/* Native-A step 1 (PORT_DBZ3_WTRACK, diagnostic): report every guest store
- * made while a tracked function runs on the main thread (dbz3_wtrack.cpp). */
+/* Native-A (PORT_DBZ3_WTRACK, diagnostic): report every guest store made while
+ * the store tracker or the undo log is on (dbz3_wtrack.cpp). Besides the
+ * accessors below this covers the two raw store forms of the lift: the
+ * reservation store (stwcx.) and the vector stores ppu_liftfast.py routes
+ * through lf_vstore. Without DBZ3_WTRACK all of it compiles to the plain
+ * store. */
 #ifdef DBZ3_WTRACK
 extern "C" volatile int g_dbz3_wtrack_on;
 extern "C" void dbz3_wtrack_note(uint32_t a, uint32_t n);
 #define LF_WT(a, n) do { if (__builtin_expect(g_dbz3_wtrack_on, 0)) dbz3_wtrack_note((a), (n)); } while (0)
+static inline int lf_stwcx32(uint64_t ea, uint32_t expected, uint32_t v)
+{
+    LF_WT((uint32_t)ea, 4u);
+    return (ppu_stwcx32)(ea, expected, v);
+}
+#define ppu_stwcx32(ea, e, v) lf_stwcx32((ea), (e), (v))
 #else
 #define LF_WT(a, n) ((void)0)
 #endif
+
+/* Vector stores: memcpy(vm_base + ea, &vr, n) in the lift. */
+static inline __attribute__((always_inline)) void lf_vstore(uint8_t* dst, const void* src, size_t n)
+{
+    LF_WT((uint32_t)(dst - lf_vm_base), (uint32_t)n);
+    memcpy(dst, src, n);
+}
 
 LF_INLINE int lf_plain(uint32_t a)
 {

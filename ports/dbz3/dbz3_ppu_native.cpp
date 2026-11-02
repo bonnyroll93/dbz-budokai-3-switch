@@ -15,6 +15,7 @@
 
 #define PPU_FAST_VM 1
 #include "ppu_recomp.h"
+#include "dbz3_store_hook.h"
 
 #include <arm_neon.h>
 #include <cstdio>
@@ -158,6 +159,7 @@ void func_00025130(ppu_context* ctx)
     const uint8x16_t m2 = vld1q_u8(vm_base + K + 0x20);
     const uint8x16_t t = vperm(vperm(v5, v2, m1), vperm(v3, v4, m1), m2);
 
+    dbz3_store_hook(out, 0x40u);
     vst1q_u8(vm_base + out + 0x00, row(r00, r01, r02, 0.0f));
     vst1q_u8(vm_base + out + 0x10, row(r10, r11, r12, 0.0f));
     vst1q_u8(vm_base + out + 0x20, row(r20, r21, r22, 0.0f));
@@ -204,6 +206,7 @@ void func_00292628(ppu_context* ctx)
     ctx->gpr[3] = dst;                               /* rldicl r3,r3,0,32 */
     if (!n) return;
     if (n <= 0xFFFFFFFFull && mm_plain(dst, n) && mm_plain(src, n) && mm_unreserved(dst, n)) {
+        dbz3_store_hook(dst, (uint32_t)n);
         memmove(vm_base + dst, vm_base + src, (size_t)n);
         return;
     }

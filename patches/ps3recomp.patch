@@ -458,7 +458,7 @@ index 5166a47..1429b08 100644
  
      if (!ps3_path || !host_buf || buf_size == 0)
 diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
-index f2b4c11..ec19934 100644
+index f2b4c11..315aeee 100644
 --- a/libs/input/cellPad.c
 +++ b/libs/input/cellPad.c
 @@ -23,7 +23,12 @@
@@ -486,16 +486,21 @@ index f2b4c11..ec19934 100644
  #endif
  
  #if PAD_BACKEND_SDL2
-@@ -82,6 +87,101 @@ static PadHostState  s_host_state[PAD_MAX_HOST_PORTS];
+@@ -82,6 +87,106 @@ static PadHostState  s_host_state[PAD_MAX_HOST_PORTS];
  /* Per-port "a report has arrived since your last read" flag; see cellPadGetData. */
  static int s_data_fresh[PAD_MAX_HOST_PORTS];
  
 +#if PAD_BACKEND_SWITCH
 +static FILE *s_switch_pad_log;
 +static unsigned s_switch_pad_events;
++extern int ps3_diag_enabled;   /* cellGcmSys.c; set at boot from diag.on */
 +static void pad_init_backend(void)
 +{
-+    s_switch_pad_log = fopen("sdmc:/switch/dbz-budokai-3-switch/t21-input.log", "w");
++    /* diag.on only: each record is flushed to the SD on the guest's main
++     * thread, and a fight logs 10-35 records a second (run87: ~1.5 ms per
++     * frame inside cellPadGetData/GetInfo2). */
++    s_switch_pad_log = ps3_diag_enabled
++        ? fopen("sdmc:/switch/dbz-budokai-3-switch/t21-input.log", "w") : NULL;
 +    s_switch_pad_events = 0;
 +    if (s_switch_pad_log) {
 +        fputs("backend=libnx B=Cross A=Circle Y=Square X=Triangle Plus=Start; records=state_changes max=4000\n", s_switch_pad_log);
@@ -588,7 +593,7 @@ index f2b4c11..ec19934 100644
  #if PAD_BACKEND_SDL2
  static SDL_GameController* s_sdl_controllers[PAD_MAX_HOST_PORTS];
  static int s_sdl_inited = 0;
-@@ -190,37 +290,37 @@ static void pad_poll_keyboard(void)
+@@ -190,37 +295,37 @@ static void pad_poll_keyboard(void)
  
  static void pad_poll_xinput(void)
  {
@@ -649,7 +654,7 @@ index f2b4c11..ec19934 100644
  
          s_host_state[i].buttons = btns;
  
-@@ -228,14 +328,14 @@ static void pad_poll_xinput(void)
+@@ -228,14 +333,14 @@ static void pad_poll_xinput(void)
           * 128 (256 - x), NOT 255 - x: the latter turns a centered stick into 127,
           * whose bits (0x7F) alias SELECT+START and can make the guest self-exit.
           * (via sagemono, PR #42) */
@@ -670,7 +675,7 @@ index f2b4c11..ec19934 100644
  
          /* Pressure-sensitive buttons: XInput has digital only, so 0 or 255 */
          s_host_state[i].press_up       = (btns & CELL_PAD_CTRL_UP)       ? 255 : 0;
-@@ -434,7 +534,9 @@ static void pad_poll_backend(void)
+@@ -434,7 +539,9 @@ static void pad_poll_backend(void)
       * every port. cellPadGetData hands each one out exactly once. */
      for (int _i = 0; _i < PAD_MAX_HOST_PORTS; _i++) s_data_fresh[_i] = 1;
  
@@ -681,7 +686,7 @@ index f2b4c11..ec19934 100644
      pad_poll_xinput();
  #elif PAD_BACKEND_SDL2
      pad_poll_sdl2();
-@@ -502,6 +604,13 @@ void cellPad_poll(void)
+@@ -502,6 +609,13 @@ void cellPad_poll(void)
   * were fixed.) These used to be redeclared here with a 64-bit address
   * parameter, which conflicts with the header now that it is included. */
  
@@ -695,7 +700,7 @@ index f2b4c11..ec19934 100644
  s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
  {
      { static int _once = 0;
-@@ -516,8 +625,8 @@ s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
+@@ -516,8 +630,8 @@ s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
      CellPadData _d; CellPadData* data = &_d;
      memset(data, 0, sizeof(CellPadData));
  
@@ -706,7 +711,7 @@ index f2b4c11..ec19934 100644
  
      /* YDKJ_INJECT_PAD: the game's wait loop polls the pad (cellPadSetActDirect /
       * GetData) -- if it's parked on a "press button" prompt after loading, no
-@@ -618,7 +727,7 @@ skip_inject: ;
+@@ -618,7 +732,7 @@ skip_inject: ;
       * LEFT 0x0080, RIGHT 0x0020, CROSS 0x4000, CIRCLE 0x2000, TRIANGLE 0x1000.
       * Legit input simulation on the same footing as PAD_AUTOPRESS/PAD_STICK. */
      { static int s_sc = -1;
@@ -715,7 +720,7 @@ index f2b4c11..ec19934 100644
        static unsigned long long t0 = 0;   /* not ULONGLONG: this builds on POSIX too */
        if (s_sc < 0) {
            s_sc = 0;
-@@ -626,7 +735,7 @@ skip_inject: ;
+@@ -626,7 +740,7 @@ skip_inject: ;
            if (e && *e) {
                s_sc = 1; t0 = GetTickCount64();
                const char* p = e;
@@ -724,7 +729,7 @@ index f2b4c11..ec19934 100644
                    double t = strtod(p, (char**)&p);
                    if (*p == ':') p++;
                    unsigned m = (unsigned)strtoul(p, (char**)&p, 0);
-@@ -644,14 +753,14 @@ skip_inject: ;
+@@ -644,14 +758,14 @@ skip_inject: ;
             * happens. Fire on the first poll at or after the event time and
             * hold it for a fixed number of polls, which is what a real press
             * looks like regardless of poll rate. */
@@ -741,7 +746,7 @@ index f2b4c11..ec19934 100644
                    if (!said[i]) { said[i] = 1;
                        printf("[cellPad] PAD_SCRIPT t=%.1fs press 0x%04X\n", ev[i].t, ev[i].mask); }
                }
-@@ -824,7 +933,7 @@ emit:
+@@ -824,7 +938,7 @@ emit:
      {
          static int always = -1;
          if (always < 0) always = getenv("PAD_ALWAYS_CHANGE") ? 1 : 0;
@@ -750,7 +755,7 @@ index f2b4c11..ec19934 100644
              if (!s_data_fresh[port_no]) data->len = 0;   /* nothing new: end the drain */
              else                        s_data_fresh[port_no] = 0;
          }
-@@ -835,6 +944,21 @@ emit:
+@@ -835,6 +949,21 @@ emit:
          for (int _i = 0; _i < CELL_PAD_MAX_CODES; _i++)                    /* button[] u16 */
              vm_write16((unsigned long long)ea + 4 + (unsigned int)_i * 2, data->button[_i]);
      }

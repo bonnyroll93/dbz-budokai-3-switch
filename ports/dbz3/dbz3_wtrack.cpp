@@ -27,6 +27,34 @@ extern "C" volatile int g_dbz3_wtrack_on = 0;
 
 namespace {
 
+/* ---- undo log ------------------------------------------------------------
+ * While a transaction is open (dbz3_undo_begin), every store from the thread
+ * that opened it records the bytes it is about to overwrite. Rolling back
+ * restores them newest first, which leaves guest memory as it was when the
+ * transaction began, however many stores and callees ran in between. Used by
+ * the native verify harnesses for functions whose callees write too much to
+ * list by hand. */
+const unsigned kUndoEntries = 65536;
+const uint32_t kUndoArena = 2u << 20;
+struct UndoEntry { uint32_t addr, len, off; };
+UndoEntry s_undo[kUndoEntries];
+uint8_t s_undo_bytes[kUndoArena];
+unsigned s_undo_n;
+uint32_t s_undo_used;
+int s_undo_on, s_undo_overflow, s_track_on;
+Handle s_undo_thread;
+
+inline void update_flag() { g_dbz3_wtrack_on = s_undo_on || s_track_on; }
+
+void undo_record(uint32_t a, uint32_t n)
+{
+    if (s_undo_n == kUndoEntries || s_undo_used + n > kUndoArena) { s_undo_overflow = 1; return; }
+    UndoEntry& e = s_undo[s_undo_n++];
+    e.addr = a; e.len = n; e.off = s_undo_used;
+    memcpy(s_undo_bytes + s_undo_used, vm_base + a, n);
+    s_undo_used += n;
+}
+
 enum { R3 = 0, R4 = 1, R5 = 2, STACK = 3, CMD = 4, PAGE = 5 };
 const char* const kClass[] = { "r3", "r4", "r5", "stack", "cmd", "page" };
 const uint32_t kGcmCtxPtr = 0x005D5610u;   // CellGcmContextData*: begin, end, current
@@ -153,7 +181,8 @@ extern "C" void dbz3_wtrack_enter(ppu_context* c, uint32_t fn)
     f.r[2] = (uint32_t)c->gpr[5];
     f.r1 = (uint32_t)c->gpr[1];
     f.cur0 = gcm_current();
-    g_dbz3_wtrack_on = 1;
+    s_track_on = 1;
+    update_flag();
 }
 
 extern "C" void dbz3_wtrack_leave(ppu_context* c, uint32_t fn)
@@ -168,7 +197,8 @@ extern "C" void dbz3_wtrack_leave(ppu_context* c, uint32_t fn)
         if (cur >= f.cur0) st.cur_delta += cur - f.cur0;   // a buffer wrap counts 0
     }
     if (s_depth) return;
-    g_dbz3_wtrack_on = 0;
+    s_track_on = 0;
+    update_flag();
     const uint64_t now = armGetSystemTick();
     if (!s_window) s_window = now;
     if (armTicksToNs(now - s_window) >= 5000000000ull) {
@@ -179,7 +209,9 @@ extern "C" void dbz3_wtrack_leave(ppu_context* c, uint32_t fn)
 
 extern "C" void dbz3_wtrack_note(uint32_t a, uint32_t n)
 {
-    if (threadGetCurHandle() != s_thread) return;
+    const Handle self = threadGetCurHandle();
+    if (s_undo_on && self == s_undo_thread) undo_record(a, n);
+    if (!s_track_on || self != s_thread) return;
     const unsigned depth = s_depth < kMaxDepth ? s_depth : kMaxDepth;
     const bool in_cmd = a - s_cmd_lo < s_cmd_hi - s_cmd_lo;
     for (unsigned d = 0; d < depth; d++) {
@@ -197,4 +229,38 @@ extern "C" void dbz3_wtrack_note(uint32_t a, uint32_t n)
         else if (in_cmd) { add(f.fi, (uint32_t)CMD << 28, 0, 0); st.cmd_bytes += n; }
         else { add(f.fi, (uint32_t)PAGE << 28 | a >> 16, a, a + n); st.page_bytes += n; }
     }
+}
+
+/* ---- undo log API ---- */
+extern "C" void dbz3_undo_begin(void)
+{
+    s_undo_n = 0;
+    s_undo_used = 0;
+    s_undo_overflow = 0;
+    s_undo_thread = threadGetCurHandle();
+    s_undo_on = 1;
+    update_flag();
+}
+
+extern "C" void dbz3_undo_end(void)
+{
+    s_undo_on = 0;
+    update_flag();
+}
+
+extern "C" int dbz3_undo_overflow(void) { return s_undo_overflow; }
+extern "C" unsigned dbz3_undo_count(void) { return s_undo_n; }
+
+extern "C" void dbz3_undo_entry(unsigned i, uint32_t* addr, uint32_t* len, const uint8_t** old)
+{
+    *addr = s_undo[i].addr;
+    *len = s_undo[i].len;
+    *old = s_undo_bytes + s_undo[i].off;
+}
+
+/* Newest first: the oldest bytes of an address are written last. */
+extern "C" void dbz3_undo_rollback(void)
+{
+    for (unsigned i = s_undo_n; i-- > 0;)
+        memcpy(vm_base + s_undo[i].addr, s_undo_bytes + s_undo[i].off, s_undo[i].len);
 }

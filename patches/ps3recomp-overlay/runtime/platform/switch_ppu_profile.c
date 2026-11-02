@@ -28,6 +28,11 @@ volatile uint32_t g_ppu_fn_depth;
  * main thread is running, 0 outside tasks. Weak so other ports link without it. */
 extern uint32_t g_dbz3_cur_task_fn __attribute__((weak));
 
+/* Position inside one function: when the innermost lifted function is
+ * SITE_FN, the sample also counts ctx->lr, the return point of the last call
+ * it made. Time in native code and imports it calls lands on that call site. */
+#define SITE_FN 0x000328A8u
+
 #define HOT_BUCKETS 16384u
 typedef struct { uint32_t addr, task, samples; } HotBucket;
 
@@ -58,6 +63,9 @@ static void hot_dump(HotBucket* tab, unsigned n, const char* fmt_kind)
         else if (fmt_kind[0] == 'i')
             fprintf(s_hot_file, "  incl=0x%08X task=0x%08X %u\n",
                     tab[best].addr, tab[best].task, tab[best].samples);
+        else if (fmt_kind[0] == 's')
+            fprintf(s_hot_file, "  site=0x%08X fn=0x%08X %u\n",
+                    tab[best].addr, tab[best].task, tab[best].samples);
         else if (fmt_kind[0] == 'e')
             fprintf(s_hot_file, "  edge=0x%08X->0x%08X %u\n",
                     tab[best].task, tab[best].addr, tab[best].samples);
@@ -75,7 +83,7 @@ static void* ppu_hot_sampler(void* unused)
 {
     (void)unused;
     static HotBucket by_fn[HOT_BUCKETS], by_pair[HOT_BUCKETS], by_task[HOT_BUCKETS];
-    static HotBucket by_incl[HOT_BUCKETS], by_edge[HOT_BUCKETS];
+    static HotBucket by_incl[HOT_BUCKETS], by_edge[HOT_BUCKETS], by_site[HOT_BUCKETS];
     static uint32_t chain[256];
     unsigned total = 0, lost = 0, chained = 0, max_depth = 0;
     uint64_t window = armGetSystemTick();
@@ -90,6 +98,7 @@ static void* ppu_hot_sampler(void* unused)
         if (!hot_add(by_fn, a, 0)) lost++;
         hot_add(by_pair, a, t);
         hot_add(by_task, 0, t);
+        if (s_fn_mode && a == SITE_FN) hot_add(by_site, ppu_main_lr(), a);
         if (s_fn_mode) {
             /* The main thread keeps running while this copies the chain; a
              * sample caught mid call or return is off by one level at most. */
@@ -115,12 +124,14 @@ static void* ppu_hot_sampler(void* unused)
         hot_dump(by_pair, 120, "p");
         hot_dump(by_incl, 200, "i");
         hot_dump(by_edge, 300, "e");
+        hot_dump(by_site, 150, "s");
         fflush(s_hot_file);
         memset(by_fn, 0, sizeof by_fn);
         memset(by_pair, 0, sizeof by_pair);
         memset(by_task, 0, sizeof by_task);
         memset(by_incl, 0, sizeof by_incl);
         memset(by_edge, 0, sizeof by_edge);
+        memset(by_site, 0, sizeof by_site);
         total = lost = chained = max_depth = 0;
         window = armGetSystemTick();
     }

@@ -374,24 +374,47 @@ uint64_t g_step_acc = 0;
 /*
  * Frame pacing for logic60 (run29: frames of 25-45 ms gave 1, 2 or 3 logic
  * steps per image -> right average speed, uneven motion). Present at a fixed
- * rate instead: 30 Hz when the frame's own work is above ~18 ms (then every
- * image is 2 logic steps), 60 Hz when it is below ~14 ms. Called just before
- * the flip; sleeps until the next slot.
+ * rate instead, 30 Hz (2 logic steps per image) or 60 Hz (1 step). Called just
+ * before the flip; sleeps until the next slot.
+ *
+ * The choice is made on the cost of a 60 Hz image: the work since the last
+ * flip minus the extra logic steps run in it. At 30 Hz the work holds two
+ * steps, so comparing it with a 60 Hz budget (as before run100) asked for
+ * ~10.7 ms where 16.7 ms is enough. Up to 60 Hz when the estimate averages
+ * below kPaceUpUs, back to 30 Hz when it averages above kPaceDownUs; after a
+ * drop, 60 Hz is not tried again for kPaceHoldFrames images.
  */
-uint64_t g_pace_target = 0;     /* ticks of the current slot */
+constexpr double kPaceUpUs = 14500.0;   /* run100: 15500 flipped 30/60 every ~4 s */
+constexpr double kPaceDownUs = 16700.0;
+constexpr uint32_t kPaceHoldFrames = 120;
+uint64_t g_pace_target = 0;      /* ticks of the current slot */
 uint64_t g_pace_interval_us = 16667;
-double g_pace_work_ema = 0.0;
-uint64_t g_pace_sleep_us = 0, g_pace_late = 0;
+double g_pace_work_ema = 0.0;    /* whole image, for the log */
+double g_pace_est_ema = 0.0;     /* image without its extra logic steps */
+uint64_t g_pace_extra_ticks = 0; /* extra logic steps since the last flip */
+uint32_t g_pace_hold = 0;
+uint64_t g_pace_sleep_us = 0, g_pace_late = 0, g_pace_switches = 0;
 
 void pace_before_flip(void)
 {
     const uint64_t now = lp_ticks();
     if (g_flip_end) {
         const double work = (double)lp_us(now - g_flip_end);
+        const double extra = (double)lp_us(g_pace_extra_ticks);
+        const double est = work > extra ? work - extra : 0.0;
         g_pace_work_ema = g_pace_work_ema == 0.0 ? work : g_pace_work_ema * 0.9 + work * 0.1;
-        if (g_pace_work_ema > 18000.0) g_pace_interval_us = 33333;
-        else if (g_pace_work_ema < 14000.0) g_pace_interval_us = 16667;
+        g_pace_est_ema = g_pace_est_ema == 0.0 ? est : g_pace_est_ema * 0.9 + est * 0.1;
+        if (g_pace_hold) g_pace_hold--;
+        if (g_pace_interval_us == 16667 && g_pace_est_ema > kPaceDownUs) {
+            g_pace_interval_us = 33333;
+            g_pace_hold = kPaceHoldFrames;
+            g_pace_switches++;
+        } else if (g_pace_interval_us != 16667 && !g_pace_hold && g_pace_est_ema < kPaceUpUs) {
+            g_pace_interval_us = 16667;
+            g_pace_switches++;
+        }
     }
+    g_pace_extra_ticks = 0;
     const uint64_t interval = g_pace_interval_us * 19u + g_pace_interval_us / 5u;   /* us -> 19.2 MHz ticks */
     if (!g_pace_target) { g_pace_target = now; return; }
     uint64_t target = g_pace_target + interval;
@@ -413,11 +436,14 @@ void pace_before_flip(void)
 
     static uint32_t n = 0;
     if (++n % 150u == 0 && g_log) {
-        fprintf(g_log, "  pace interval_us=%llu work_ema_us=%.0f sleep_us/frame=%.0f late=%llu/150\n",
+        fprintf(g_log, "  pace interval_us=%llu work_ema_us=%.0f sleep_us/frame=%.0f late=%llu/150"
+                       " est60_ema_us=%.0f switches=%llu\n",
                 (unsigned long long)g_pace_interval_us, g_pace_work_ema,
-                (double)g_pace_sleep_us / 150.0, (unsigned long long)g_pace_late);
+                (double)g_pace_sleep_us / 150.0, (unsigned long long)g_pace_late,
+                g_pace_est_ema, (unsigned long long)g_pace_switches);
         g_pace_sleep_us = 0;
         g_pace_late = 0;
+        g_pace_switches = 0;
     }
 }
 
@@ -796,6 +822,7 @@ uint32_t gcm_put(void) { return vm_read32(ppu_hle_inject_base + 0x2000u); }
 
 int extra_logic_step(ppu_context* ctx)
 {
+    const uint64_t pace_t0 = lp_ticks();
     const uint64_t t0 = metric_ticks();
     const uint64_t sig0 =
 #ifdef PORT_DBZ3_LOOP_METRICS
@@ -896,6 +923,7 @@ int extra_logic_step(ppu_context* ctx)
     ctx->gpr[30] = save_r30; ctx->gpr[31] = save_r31;
     ctx->lr = save_lr;
 
+    g_pace_extra_ticks += lp_ticks() - pace_t0;
     const uint64_t us = lp_us(metric_ticks() - t0);
     g_w.extra_us += us;
     if (us > g_w.extra_max_us) g_w.extra_max_us = us;

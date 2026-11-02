@@ -25,6 +25,7 @@
  */
 #define PPU_FAST_VM 1
 #include "dbz3_lifted_prelude.inc"
+#include "dbz3_store_hook.h"
 
 #include <switch.h>
 #include <cstdarg>
@@ -41,8 +42,8 @@ inline uint8_t  r8(uint32_t a)  { return vm_base[a]; }
 inline uint16_t r16(uint32_t a) { uint16_t v; memcpy(&v, vm_base + a, 2); return __builtin_bswap16(v); }
 inline uint32_t r32(uint32_t a) { uint32_t v; memcpy(&v, vm_base + a, 4); return __builtin_bswap32(v); }
 inline double   rf(uint32_t a)  { const uint32_t w = r32(a); float f; memcpy(&f, &w, 4); return f; }   // lfs
-inline void w8(uint32_t a, uint32_t v)  { vm_base[a] = (uint8_t)v; }
-inline void w32(uint32_t a, uint32_t v) { v = __builtin_bswap32(v); memcpy(vm_base + a, &v, 4); }
+inline void w8(uint32_t a, uint32_t v)  { dbz3_store_hook(a, 1u); vm_base[a] = (uint8_t)v; }
+inline void w32(uint32_t a, uint32_t v) { dbz3_store_hook(a, 4u); v = __builtin_bswap32(v); memcpy(vm_base + a, &v, 4); }
 inline uint32_t fb(double d) { const float f = (float)d; uint32_t w; memcpy(&w, &f, 4); return w; }      // stfs
 
 const uint32_t kRendererVtable = 0x002C4690u;

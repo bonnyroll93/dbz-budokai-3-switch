@@ -246,6 +246,24 @@ bool read_ring(uint32_t c, Ring& r)
     return true;
 }
 
+/* read_ring for the per-call lap check: the EA -> IO translation of a ring is
+ * kept while the context's begin/end stay the same (~1300 calls a frame in a
+ * fight, two table lookups each). */
+bool read_ring_cached(uint32_t c, Ring& r)
+{
+    thread_local uint32_t k_c = 0, k_begin = 0, k_end = 0;
+    thread_local Ring k_ring;
+    thread_local bool k_ok = false;
+    if (!plain_range(c, 0x10)) return false;
+    const uint32_t begin = vm_read32(c + 0x0), end = vm_read32(c + 0x4);
+    if (c != k_c || begin != k_begin || end != k_end) {
+        k_ok = read_ring(c, k_ring);
+        k_c = c; k_begin = begin; k_end = end;
+    }
+    r = k_ring;
+    return k_ok;
+}
+
 /* Wrap context `c` back to its ring's start on the calling (title) thread,
  * leaving room for `need` bytes there. False when the context is not a ring
  * this can wrap; nothing has been changed then. */
@@ -405,7 +423,7 @@ extern "C" void wrap_func_001FCAC4(ppu_context* ctx)
     /* Do not write into the unread tail of the previous lap: a walker ahead of
      * the write head, inside the ring, is still reading it. */
     Ring ring;
-    if (read_ring(c, ring) && cur >= ring.begin && cur < ring.end) {
+    if (read_ring_cached(c, ring) && cur >= ring.begin && cur < ring.end) {
         const uint32_t lo = ring.io(cur), hi = lo + (uint32_t)out_bytes + 4u;
         auto blocked = [&](uint32_t g) { return ring.in(g) && g > lo && g < hi; };
         if (blocked(cellGcm_fifo_get_offset())) {

@@ -51,3 +51,42 @@ void func_0004E288_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_0004E
 void func_0004EB98_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_0004EB98P11ppu_context")));
 void func_00050844_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_00050844P11ppu_context")));
 #endif
+/* Hot math (dbz3_native_math.cpp): one function per translation unit, since
+ * an alias must name a definition in the same object. */
+#ifdef DBZ3_NATIVE_MATH_TU000
+void func_000252B0(ppu_context* ctx) __attribute__((weak));   /* defined in TU 000 */
+void func_000252B0_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_000252B0P11ppu_context")));
+void func_0001F1E8(ppu_context* ctx) __attribute__((weak));   /* defined in TU 000 */
+void func_0001F1E8_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_0001F1E8P11ppu_context")));
+void func_0001EEF8(ppu_context* ctx) __attribute__((weak));   /* defined in TU 000 */
+void func_0001EEF8_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_0001EEF8P11ppu_context")));
+void func_0001F164(ppu_context* ctx) __attribute__((weak));   /* defined in TU 000 */
+void func_0001F164_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_0001F164P11ppu_context")));
+void func_0001EF6C(ppu_context* ctx) __attribute__((weak));   /* defined in TU 000 */
+void func_0001EF6C_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_0001EF6CP11ppu_context")));
+void func_000297B8(ppu_context* ctx) __attribute__((weak));   /* defined in TU 000 */
+void func_000297B8_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_000297B8P11ppu_context")));
+void func_000299AC(ppu_context* ctx) __attribute__((weak));   /* defined in TU 000 */
+void func_000299AC_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_000299ACP11ppu_context")));
+void func_000357A0(ppu_context* ctx) __attribute__((weak));   /* defined in TU 000 */
+void func_000357A0_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_000357A0P11ppu_context")));
+void func_00024F58(ppu_context* ctx) __attribute__((weak));   /* defined in TU 000 */
+void func_00024F58_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_00024F58P11ppu_context")));
+#endif
+#ifdef DBZ3_NATIVE_MATH_TU005
+void func_002B6E00(ppu_context* ctx) __attribute__((weak));   /* defined in TU 005: cellGcmAddressToOffset stub */
+void func_002B6E00_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_002B6E00P11ppu_context")));
+#endif
+#ifdef DBZ3_NATIVE_MATH_TU004
+void func_002A733C(ppu_context* ctx) __attribute__((weak));   /* defined in TU 004 */
+void func_002A733C_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_002A733CP11ppu_context")));
+void func_002993A0(ppu_context* ctx) __attribute__((weak));   /* defined in TU 004: memset */
+void func_002993A0_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_002993A0P11ppu_context")));
+#endif
+/* Native-A step 2c: mesh draw bodies (dbz3_native_mesh.cpp). */
+#ifdef DBZ3_NATIVE_MESH
+void func_0001AA00(ppu_context* ctx) __attribute__((weak));   /* defined in TU 000 */
+void func_000328A8(ppu_context* ctx) __attribute__((weak));   /* defined in TU 000 */
+void func_0001AA00_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_0001AA00P11ppu_context")));
+void func_000328A8_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_000328A8P11ppu_context")));
+#endif

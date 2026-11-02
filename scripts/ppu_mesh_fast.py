@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+"""Native-A step 2c: build-time fast copies of selected lifted functions.
+
+Takes the listed functions out of a lifted PPU source and writes them, renamed
+func_XXXXXXXX_fast, into an include file for dbz3_native_mesh.cpp:
+  - AltiVec blocks in NEON (the rules of ppu_vecneon.py);
+  - the PPU registers each function uses kept in locals, stored to the context
+    only around calls (the transform of ppu_regcache.py, for every function);
+  - vector stores routed through lf_vstore like ppu_liftfast.py does.
+Compiled in their own small translation unit with the liftfast accessors, so
+the compiler inlines the memory accessors and keeps the registers in host
+registers. The checked-in lift is untouched; dbz3_native_mesh.cpp verifies
+every call of these copies against the lifted function (mesh-verify).
+
+usage: ppu_mesh_fast.py LIFTED_SOURCE OUTPUT FUNC[,FUNC...]
+"""
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ppu_regcache   # noqa: E402
+import ppu_vecneon    # noqa: E402
+
+FUNC_RE = re.compile(r'^void func_([0-9A-Fa-f]{8})\(ppu_context\* ctx\) \{$')
+
+# PPC64 ELF ABI as the game's compiler follows it: a callee reads only its
+# arguments (r3-r10, f1-f13) besides r1 and r2, returns in r3/r4 and f1-f4,
+# and leaves r14-r31, f14-f31 and cr2-cr4 as it found them. So around a call
+# only the argument registers need to be in the context, and only the return
+# registers need reloading; the others stay in locals. (ctr carries the target
+# of an indirect call.) A call that is also an exit stores everything written.
+ARG_KEYS = {(0, str(n)) for n in range(1, 11)} | {(1, str(n)) for n in range(1, 14)} | {(4, 'ctr')}
+RET_KEYS = {(0, '3'), (0, '4')} | {(1, str(n)) for n in range(1, 5)}
+
+
+def transform_abi(header, body):
+    rc = ppu_regcache
+    used, written, seen = [], set(), set()
+    for line in body:
+        sync = rc.is_sync_line(line)
+        for fi, (pat, _, _, _) in enumerate(rc.FIELDS):
+            for key in pat.findall(line):
+                if (fi, key) not in seen:
+                    seen.add((fi, key))
+                    used.append((fi, key))
+            if sync:
+                continue
+            for key in re.compile(pat.pattern + rc.ASSIGN_TAIL).findall(line):
+                written.add((fi, key))
+            for key in re.compile(r'&\s*' + pat.pattern).findall(line):
+                written.add((fi, key))
+    if not used:
+        return [header] + body, False
+
+    def local(fi, key):
+        return rc.FIELDS[fi][1].format(key)
+
+    def ctxv(fi, key):
+        return rc.FIELDS[fi][3].format(key)
+
+    def stores(keys):
+        return ' '.join(f'{ctxv(fi, k)} = {local(fi, k)};' for fi, k in sorted(keys))
+
+    def loads(keys):
+        return ' '.join(f'{local(fi, k)} = {ctxv(fi, k)};' for fi, k in sorted(keys))
+
+    def rename(line):
+        for fi, (pat, name, _, _) in enumerate(rc.FIELDS):
+            line = pat.sub(lambda m, n=name: n.format(m.group(1)), line)
+        return line
+
+    used_set = set(used)
+    exit_store = stores(written)
+    out = [header]
+    by_type = {}
+    for fi, k in sorted(used):
+        by_type.setdefault(rc.FIELDS[fi][2], []).append(f'{local(fi, k)} = {ctxv(fi, k)}')
+    for ctype, decls in by_type.items():
+        out.append(f'    {ctype} ' + ', '.join(decls) + ';')
+    for line in body:
+        if rc.is_sync_line(line):
+            on_line = set()
+            for fi, (pat, _, _, _) in enumerate(rc.FIELDS):
+                for key in pat.findall(line):
+                    on_line.add((fi, key))
+            if rc.EXIT_RE.search(line):
+                pre = written | on_line
+            else:
+                pre = (ARG_KEYS & used_set) | on_line
+            post = (RET_KEYS & used_set) | on_line
+            if pre:
+                out.append('    ' + stores(pre & (written | on_line | ARG_KEYS)))
+            out.append(line)
+            if post:
+                out.append('    ' + loads(post))
+            continue
+        new = rename(line)
+        if exit_store:
+            new = rc.EXIT_RE.sub(lambda m: '{ ' + exit_store + ' ' + m.group(0) + ' }', new)
+        out.append(new)
+    if exit_store:
+        out.append('    ' + exit_store)
+    return out, True
+
+
+def extract(lines, name):
+    head = 'void func_%s(ppu_context* ctx) {' % name
+    try:
+        i = lines.index(head)
+    except ValueError:
+        sys.exit('ppu_mesh_fast.py: func_%s not found' % name)
+    j = i + 1
+    while j < len(lines) and lines[j] != '}':
+        j += 1
+    return lines[i], lines[i + 1:j]
+
+
+def main():
+    if len(sys.argv) != 4:
+        sys.exit(__doc__)
+    src, dst, names = sys.argv[1], sys.argv[2], [n.upper() for n in sys.argv[3].split(',') if n]
+    lines = open(src, encoding='utf-8', errors='surrogateescape').read().split('\n')
+    ppu_regcache.ALL_FUNCS = True
+    out = ['/* Generated by scripts/ppu_mesh_fast.py from %s -- do not edit. */'
+           % os.path.basename(src), ppu_vecneon.PRELUDE]
+    for name in names:
+        header, body = extract(lines, name)
+        text = '\n'.join(body)
+        for rx, fn in ppu_vecneon.RULES:
+            text = rx.sub(fn, text)
+        text = text.replace('memcpy(vm_base + (uint32_t)ea,', 'lf_vstore(vm_base + (uint32_t)ea,')
+        new, changed = transform_abi(header, text.split('\n'))
+        if not changed:
+            sys.exit('ppu_mesh_fast.py: func_%s was not rewritten' % name)
+        new[0] = 'void func_%s_fast(ppu_context* ctx) {' % name
+        out.extend(new)
+        out.append('}')
+    open(dst, 'w', encoding='utf-8', errors='surrogateescape', newline='\n').write('\n'.join(out) + '\n')
+    print('ppu_mesh_fast: %d functions -> %s' % (len(names), dst))
+
+
+if __name__ == '__main__':
+    main()
