@@ -83,7 +83,7 @@ index 94de794..9cbeb9e 100644
      target_include_directories(ps3recomp_runtime PRIVATE "${PS3RECOMP_VULKAN_INCLUDE_DIR}")
      # PUBLIC: ps3recomp_host selects its backend on this definition.
 diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
-index b51fb7c..d0d9eeb 100644
+index b51fb7c..ee9d29c 100644
 --- a/libs/audio/cellAudio.c
 +++ b/libs/audio/cellAudio.c
 @@ -34,7 +34,13 @@ extern uint32_t sys_event_queue_create_direct(uint64_t key, int32_t size);
@@ -346,10 +346,71 @@ index b51fb7c..d0d9eeb 100644
  
          /* Keep the monotonic counter for tags/timestamps, but publish the
           * ring slot to the guest. SurMixer multiplies this value by the block
-@@ -519,6 +716,10 @@ static void audio_mix_one_block(void)
+@@ -519,6 +716,71 @@ static void audio_mix_one_block(void)
   * Mixing thread
   * -----------------------------------------------------------------------*/
  
++#if defined(AUDIO_BACKEND_SWITCH)
++#include <time.h>
++/* Steady block clock (Switch). audout releases its buffers on its own ~5 ms
++ * cycle, which beats against the 5.33 ms block: paced by the releases, the
++ * read index advanced in bursts (two blocks back to back, then a gap), and the
++ * game's producers -- the sound engine on port 0 and libmixer (music, CRI
++ * streams) on port 1 -- compute the block to write from the read index when
++ * they wake. Two notifications handled after a two-block jump wrote the same
++ * block twice and skipped one, which then played stale: ~20% of port 0 blocks
++ * and ~1% of port 1 blocks in run139 (crackle in effects, voices and music).
++ * Here one block is mixed every 256 / 48000 s on the system clock; the audout
++ * queue (6 buffers) absorbs the difference. Time lost blocked in a full queue
++ * moves the schedule instead of being caught up in a burst.
++ * sdmc:/switch/dbz-budokai-3-switch/audio-steady-off: paced by audout. */
++static unsigned long long audio_mono_ns(void)
++{
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (unsigned long long)ts.tv_sec * 1000000000ull + (unsigned long long)ts.tv_nsec;
++}
++static int s_steady = -1;
++static unsigned long long s_steady_t0, s_steady_n, s_last_mix_ns;
++static unsigned s_mix_bursts;      /* blocks mixed < 2 ms after the previous one */
++static unsigned s_steady_resync;   /* schedule restarts (> 50 ms behind) */
++static void audio_steady_wait(void)
++{
++    if (s_steady < 0) {
++        FILE* f = fopen("sdmc:/switch/dbz-budokai-3-switch/audio-steady-off", "r");
++        s_steady = f == NULL;
++        if (f) fclose(f);
++        fprintf(stderr, "[cellAudio] block pacing: %s\n",
++                s_steady ? "steady system clock" : "audout releases (audio-steady-off)");
++    }
++    unsigned long long now = audio_mono_ns();
++    if (s_steady) {
++        /* Start (and restart) with 4 blocks queued at once: ~21 ms of output
++         * ahead of the device, so a late wake-up never starves it. */
++        if (!s_steady_t0) s_steady_t0 = now - 4ull * 16000000ull / 3ull;
++        /* n * 256 / 48000 s = n * 16000000 / 3 ns */
++        const unsigned long long due = s_steady_t0 + s_steady_n * 16000000ull / 3ull;
++        if (now < due) {
++            const unsigned long long wait = due - now;
++            struct timespec ts = { (time_t)(wait / 1000000000ull), (long)(wait % 1000000000ull) };
++            nanosleep(&ts, NULL);
++            now = audio_mono_ns();
++        } else if (now - due > 50000000ull) {
++            s_steady_t0 = now - (s_steady_n + 4ull) * 16000000ull / 3ull;
++            s_steady_resync++;
++        }
++        s_steady_n++;
++    }
++    if (s_last_mix_ns && now - s_last_mix_ns < 2000000ull) s_mix_bursts++;
++    s_last_mix_ns = now;
++}
++/* Called after a submit that waited for a free audout buffer. */
++static void audio_steady_blocked(unsigned long long blocked_ns)
++{
++    if (s_steady > 0 && blocked_ns > 1000000ull) s_steady_t0 += blocked_ns;
++}
++#endif
++
 +/* Notify pushes per 5 s window that failed (queue full or gone) and that
 + * went through, reported in t23-audio.log: a failed push is a block the game
 + * is never told to write. */
@@ -357,7 +418,7 @@ index b51fb7c..d0d9eeb 100644
  static void audio_notify_event_queues(void)
  {
      /* Push the audio-period event (data1 = CELL_AUDIO_EVENT_MIX = 0) to each
-@@ -528,9 +729,15 @@ static void audio_notify_event_queues(void)
+@@ -528,9 +790,15 @@ static void audio_notify_event_queues(void)
      for (int i = 0; i < CELL_AUDIO_MAX_NOTIFY_EVENT_QUEUES; i++) {
          if (!s_notify_queues[i].in_use) continue;
          uint32_t qid = sys_event_find_queue_by_key(s_notify_queues[i].key);
@@ -376,7 +437,7 @@ index b51fb7c..d0d9eeb 100644
      }
  }
  
-@@ -607,18 +814,69 @@ static void* audio_mix_thread_func(void* arg)
+@@ -607,18 +875,84 @@ static void* audio_mix_thread_func(void* arg)
  {
      (void)arg;
      printf("[cellAudio] Mixing thread started\n");
@@ -385,6 +446,9 @@ index b51fb7c..d0d9eeb 100644
 +#endif
  
      while (s_mix_thread_running) {
++#if defined(AUDIO_BACKEND_SWITCH)
++        audio_steady_wait();
++#endif
          audio_mix_one_block();
 +#ifdef __SWITCH__
 +        /* T23: sdmc:/switch/dbz-budokai-3-switch/t23-audio.log, every 5 s: blocks
@@ -404,9 +468,15 @@ index b51fb7c..d0d9eeb 100644
 +          unsigned long long now = (unsigned long long)ts.tv_sec * 1000ull + ts.tv_nsec / 1000000ull;
 +          if (!t0) t0 = now;
 +          if (lf && now - t0 >= 5000) {
-+              fprintf(lf, "blocks/s=%.1f silent=%.0f%% peak=%.4f dropped=%llu notify_ok=%u notify_fail=%u\n",
++              fprintf(lf, "blocks/s=%.1f silent=%.0f%% peak=%.4f dropped=%llu notify_ok=%u notify_fail=%u",
 +                      n * 1000.0 / (double)(now - t0), n ? 100.0 * z / n : 0.0, pk,
 +                      (unsigned long long)g_audio_dropped, s_notify_ok, s_notify_fail);
++#if defined(AUDIO_BACKEND_SWITCH)
++              fprintf(lf, " pacing=%s bursts=%u resync=%u",
++                      s_steady > 0 ? "steady" : "audout", s_mix_bursts, s_steady_resync);
++              s_mix_bursts = s_steady_resync = 0;
++#endif
++              fprintf(lf, "\n");
 +              s_notify_ok = s_notify_fail = 0;
 +              for (int p = 0; p < CELL_AUDIO_PORT_MAX; p++) {
 +                  AudioPortSlot* port = &s_ports[p];
@@ -432,7 +502,13 @@ index b51fb7c..d0d9eeb 100644
 +              n = z = 0; pk = 0.0f; t0 = now;
 +          } }
 +#endif
++#if defined(AUDIO_BACKEND_SWITCH)
++        { const unsigned long long t_sub = audio_mono_ns();
++          audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES);
++          audio_steady_blocked(audio_mono_ns() - t_sub); }
++#else
          audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES);
++#endif
          audio_notify_event_queues();
  
 +#if !defined(AUDIO_BACKEND_SWITCH)
@@ -446,7 +522,7 @@ index b51fb7c..d0d9eeb 100644
      }
  
      printf("[cellAudio] Mixing thread stopped\n");
-@@ -808,6 +1066,10 @@ s32 cellAudioPortOpen(const CellAudioPortParam* param, u32* portNum)
+@@ -808,6 +1142,10 @@ s32 cellAudioPortOpen(const CellAudioPortParam* param, u32* portNum)
  
      port->buffer = (float*)(vm_base + guest_buf);     /* host view of guest buffer */
      memset(port->buffer, 0, port->buf_size);

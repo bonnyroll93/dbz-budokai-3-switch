@@ -77,6 +77,13 @@ screen after a DU fight (both ~30 FPS or lower at the start).
 
 ### Fixed recently
 
+- **Crackling audio** in music, effects and voices. The read position of the
+  audio ring advanced in bursts, paced by the Switch output buffers; the
+  game's sound engine and its music mixer then wrote one block twice and
+  skipped the next, which played stale (about 20% of effect/voice blocks, 1% of
+  music blocks). Blocks are now mixed on a steady 5.33 ms clock
+  (`audio-steady-off` on the SD restores the old pacing).
+- **Missing Freezer shaders**: the two vertex shaders were captured and added.
 - **NSP failed to install** with a progressive JPEG icon. The packager now
   accepts only a baseline 256x256 JPEG and stops with a clear message otherwise.
 - **Saves outside the port folder**: earlier builds wrote them to
@@ -89,9 +96,6 @@ screen after a DU fight (both ~30 FPS or lower at the start).
 
 ### Known bugs
 
-- **Missing Freezer shaders.** Two vertex shaders used by Freezer are not in
-  the build yet: 22 pipelines are refused and those draws are not shown. Fix in
-  progress: the default build now captures missing shaders (see step 5).
 - **Animation jerks.** Since the native draw functions, characters sometimes
   jerk or their animation runs out of step with the gameplay. Not isolated yet;
   test plan: turn the natives off one group at a time with the SD switches.
@@ -103,13 +107,11 @@ screen after a DU fight (both ~30 FPS or lower at the start).
   suspect.
 - **Dragon Universe, flying.** At maximum flight speed, white pixel artifacts
   sometimes appear on screen.
-- **Audio.** Reverb is disabled (`reverb.on` turns it back on) and about 10% of
-  the audio blocks arrive late, which can be heard as crackle. Not a CPU limit;
-  still under investigation.
+- **Audio reverb** is disabled to save CPU (`reverb.on` turns it back on).
 
 ### Next goals
 
-- Freezer shaders and the animation jerks.
+- The animation jerks.
 - More headroom in duels: images often arrive just in time, so heavier scenes
   (other stages, transformations, beam struggles) may still drop frames.
 - 60 FPS on the DU map and the level screen.
@@ -343,6 +345,7 @@ the translated PS3 code when its file exists)
 | `reverb.on` | Turns the game's reverb back on (costs CPU). |
 | `bnus-prio-normal`, `bnus-prio-high` | Audio SPU thread at normal or high priority instead of the lowest. |
 | `audio-sentinel-off` | Played audio blocks cleared to zero, as the PS3 firmware does. |
+| `audio-steady-off` | Audio blocks paced by the Switch output buffers instead of a steady clock (old behaviour, crackles). |
 | `savedata-sd` | Saves on the SD card instead of the Switch save data. |
 
 To collect logs after a test, start **DBI > Run MTP responder** and run
