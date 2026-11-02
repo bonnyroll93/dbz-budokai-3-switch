@@ -235,6 +235,20 @@ static uint64_t frame_now_us(void)
 
 static uint64_t frame_now_ms(void) { return frame_now_us() / 1000ull; }
 
+/* run110: with a 1 ms nap between drains (often 1-2 ms on Horizon) the render
+ * thread slept ~3.3 ms per image at 60 Hz while the game waited on its flip.
+ * Sub-millisecond nap while the FIFO is moving. */
+static void frame_sleep_us(uint32_t microseconds)
+{
+#if defined(_WIN32)
+    const Ps3Platform *platform = ps3_platform_win32();
+    platform->time.sleep_us(platform->time.context, (uint64_t)microseconds);
+#else
+    struct timespec d = { (time_t)(microseconds / 1000000u), (long)(microseconds % 1000000u) * 1000L };
+    nanosleep(&d, NULL);
+#endif
+}
+
 static void frame_sleep_ms(uint32_t milliseconds)
 {
 #ifdef _WIN32
@@ -332,7 +346,8 @@ static DWORD WINAPI frame_clock(LPVOID)
         uint64_t section_start = frame_now_ms();
 #endif
         { const uint32_t g = cellGcm_fifo_get_offset();
-          frame_sleep_ms(g != idle_get ? 1 : 4);
+          if (g != idle_get) frame_sleep_us(250);
+          else frame_sleep_ms(4);
           idle_get = g; }
 #if defined(__SWITCH__) && defined(PORT_DBZ3_FRAME_CLOCK_METRICS)
         const uint64_t sleep_elapsed = frame_now_ms() - section_start;

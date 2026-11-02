@@ -74,6 +74,10 @@ extern NWindow* nwindowGetDefault(void);
 #define DK_MAX_EXTENTS   2048u
 #define DK_CODE_SIZE     (256u * 1024u)          /* shader code                */
 #define DK_RING_SIZE     (32u * 1024u * 1024u)   /* vertices, indices, UBOs    */
+/* Frame sets in flight (ring + command memory each). run112: with 2, every
+ * GPU frame over the CPU's budget (peaks of 25-50 ms) came straight back as a
+ * fence wait at the next present; 3 give one frame of slack. */
+#define DK_SETS          3
 
 /* One image descriptor per handle. Handles: colour targets 1..64, textures
  * from DK_TEX_BASE, surface views from DK_VIEW_BASE; the last slot is the
@@ -304,10 +308,11 @@ static struct {
     /* T23: two sets of ring + command memory. A present submits the frame
      * with a fence and switches set instead of waiting for the GPU; the set
      * is reused only after its fence. Any other submit still waits for idle. */
-    DkMemBlock set_ring[2], set_cmd[2], set_cmd_spare[2];
-    DkFence    set_fence[2];
-    int        set_pending[2];
+    DkMemBlock set_ring[DK_SETS], set_cmd[DK_SETS], set_cmd_spare[DK_SETS];
+    DkFence    set_fence[DK_SETS];
+    int        set_pending[DK_SETS];
     int        set_cur;
+    int        n_sets;             /* sets allocated (1 = synchronous presents) */
     int        async_present;      /* 0: every present waits (present-sync) */
     DkMemBlock mem_desc;           /* image + sampler descriptors            */
     u32 code_used, ring_used;
@@ -644,15 +649,21 @@ static void spk_frame_end(u64 now)
 /* The GPU has finished everything: no set is in flight any more. */
 static void dk_sets_idle(void)
 {
-    s_dk.set_pending[0] = s_dk.set_pending[1] = 0;
+    for (int i = 0; i < DK_SETS; i++) s_dk.set_pending[i] = 0;
     s_dk.staging_used = 0;         /* nothing in flight reads it any more */
 }
 
 /* Before the CPU frees or rewrites memory an earlier, still running frame may
  * read (image memory, the staging buffer). */
+static int dk_any_inflight(void)
+{
+    for (int i = 0; i < DK_SETS; i++)
+        if (s_dk.set_pending[i]) return 1;
+    return 0;
+}
 static void dk_wait_inflight_at(int line)
 {
-    if (s_dk.set_pending[0] || s_dk.set_pending[1]) {
+    if (dk_any_inflight()) {
         const u64 t0 = dk_now_us();
         dkQueueWaitIdle(s_dk.queue);
         dk_sets_idle();
@@ -683,23 +694,35 @@ static void dk_submit_wait_at(int line)
 
 #define dk_submit_wait() dk_submit_wait_at(__LINE__)
 
+/* t38 present split: the last end-of-frame submit (finish, submit, signal,
+ * flush) and its wait for the older set's fence. */
+static u64 s_pq_submit_us, s_pq_fence_us;
+
 /* End of frame: submit with a fence, move to the other set, and wait only for
  * that set's previous frame. The GPU runs frame N while the FIFO builds N+1. */
 static void dk_submit_async(void)
 {
-    if (!s_dk.async_present || !s_dk.set_ring[1]) { dk_submit_wait(); return; }
+    s_pq_submit_us = s_pq_fence_us = 0;
+    if (!s_dk.async_present || !s_dk.set_ring[1]) {
+        const u64 tw = dk_now_us();
+        dk_submit_wait();
+        s_pq_fence_us = dk_now_us() - tw;
+        return;
+    }
     const u64 t0 = dk_now_us();
     gt_list_end();
     DkCmdList list = dkCmdBufFinishList(s_dk.cmd);
     dkQueueSubmitCommands(s_dk.queue, list);
     dkQueueSignalFence(s_dk.queue, &s_dk.set_fence[s_dk.set_cur], false);
     dkQueueFlush(s_dk.queue);
+    s_pq_submit_us = dk_now_us() - t0;
     s_dk.set_pending[s_dk.set_cur] = 1;
-    s_dk.set_cur ^= 1;
+    s_dk.set_cur = (s_dk.set_cur + 1) % s_dk.n_sets;
     if (s_dk.set_pending[s_dk.set_cur]) {
         const u64 tf = dk_now_us();
         dkFenceWait(&s_dk.set_fence[s_dk.set_cur], -1);
         s_spk.fence_us += dk_now_us() - tf;
+        s_pq_fence_us = dk_now_us() - tf;
         s_dk.set_pending[s_dk.set_cur] = 0;
     }
     s_dk.mem_ring = s_dk.set_ring[s_dk.set_cur];
@@ -1317,6 +1340,43 @@ static size_t s_capture_capacity;
 static int dk_ring_alloc(u32 size, u32 align, u32* off);
 static int dk_fxaa_present(u32 surface, DkImageView const* dst);
 
+/* run110: present took ~3.5 ms of wall time per image at 60 Hz for ~0.13 ms of
+ * CPU. Split it: image acquire, frame build + submit (with the fence wait for
+ * the older set), dkQueuePresentImage. t38-present.log every 300 presents. */
+#if defined(__SWITCH__) && !defined(PORT_DBZ3_LIGHT_BUILD)
+static struct { u64 acquire, build, present, total, max_acquire, max_present, record, submit, fence, max_fence, sync, async; u32 n; FILE* f; } s_pq;
+static void pq_note(u64 a, u64 b, u64 p, u64 t)
+{
+    s_pq.acquire += a; s_pq.build += b; s_pq.present += p; s_pq.total += t;
+    s_pq.submit += s_pq_submit_us; s_pq.fence += s_pq_fence_us;
+    if (b > s_pq_submit_us + s_pq_fence_us) s_pq.record += b - s_pq_submit_us - s_pq_fence_us;
+    if (s_pq_fence_us > s_pq.max_fence) s_pq.max_fence = s_pq_fence_us;
+    if (s_dk.async_present && s_dk.set_ring[1]) s_pq.async++; else s_pq.sync++;
+    if (a > s_pq.max_acquire) s_pq.max_acquire = a;
+    if (p > s_pq.max_present) s_pq.max_present = p;
+    if (++s_pq.n < 300u) return;
+    if (!s_pq.f) s_pq.f = fopen("sdmc:/switch/dbz-budokai-3-switch/t38-present.log", "w");
+    if (s_pq.f) {
+        fprintf(s_pq.f, "presents=%u acquire_us=%llu build_submit_us=%llu present_us=%llu total_us=%llu "
+                "max_acquire_us=%llu max_present_us=%llu (averages per present) | build: record_us=%llu "
+                "submit_us=%llu fence_wait_us=%llu max_fence_us=%llu async=%llu sync=%llu\n", s_pq.n,
+                (unsigned long long)(s_pq.acquire / s_pq.n), (unsigned long long)(s_pq.build / s_pq.n),
+                (unsigned long long)(s_pq.present / s_pq.n), (unsigned long long)(s_pq.total / s_pq.n),
+                (unsigned long long)s_pq.max_acquire, (unsigned long long)s_pq.max_present,
+                (unsigned long long)(s_pq.record / s_pq.n), (unsigned long long)(s_pq.submit / s_pq.n),
+                (unsigned long long)(s_pq.fence / s_pq.n), (unsigned long long)s_pq.max_fence,
+                (unsigned long long)s_pq.async, (unsigned long long)s_pq.sync);
+        fflush(s_pq.f);
+    }
+    FILE* keep = s_pq.f;
+    memset(&s_pq, 0, sizeof s_pq);
+    s_pq.f = keep;
+}
+#define PQ_NOTE(a, b, p, t) pq_note((a), (b), (p), (t))
+#else
+#define PQ_NOTE(a, b, p, t) ((void)0)
+#endif
+
 static void be_present(void* user, u32 surface)
 {
     (void)user;
@@ -1396,7 +1456,9 @@ static void be_present(void* user, u32 surface)
         }
         last_present_us = dk_now_us();
     }
+    const u64 pq_a0 = dk_now_us();
     const int slot = dkQueueAcquireImage(s_dk.queue, s_dk.swapchain);
+    const u64 pq_a1 = dk_now_us();
     if (slot < 0 || slot >= DK_NUM_SWAP) { s_dk.st.acquire_fail++; return; }
 
     DkImageView dst;
@@ -1480,10 +1542,15 @@ static void be_present(void* user, u32 surface)
     s_dk.bound_dirty = 1;
     dk_submit_async();
     gt_present();
-    /* Frame s_present_serial was just submitted; frames up to serial - 2 are done. */
-    if (s_present_serial >= 2) dk_tex_pend_collect(s_present_serial - 2u);
+    /* Frame s_present_serial was just submitted and the set it waited for held
+     * frame serial - (sets - 1); frames up to serial - sets are surely done. */
+    { const u32 lag = s_dk.n_sets > 1 ? (u32)s_dk.n_sets : 2u;
+      if (s_present_serial >= lag) dk_tex_pend_collect(s_present_serial - lag); }
     s_present_serial++;
+    const u64 pq_p0 = dk_now_us();
     dkQueuePresentImage(s_dk.queue, s_dk.swapchain, slot);
+    { const u64 pq_p1 = dk_now_us();
+      PQ_NOTE(pq_a1 - pq_a0, pq_p0 - pq_a1, pq_p1 - pq_p0, pq_p1 - t0); }
     if (s_dk.bound_count || s_dk.bound_depth) dk_rebind_targets();
 
     s_dk.st.presents++;
@@ -2589,13 +2656,19 @@ static int dk_init_device(u32 width, u32 height)
     s_dk.set_ring[0] = s_dk.mem_ring;
     s_dk.set_cmd[0] = s_dk.mem_cmd;
     s_dk.set_cmd_spare[0] = s_dk.mem_cmd_spare;
-    s_dk.set_ring[1] = dk_block(DK_RING_SIZE, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached);
-    s_dk.set_cmd[1] = dk_block(DK_CMD_SIZE, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached);
-    s_dk.set_cmd_spare[1] = dk_block(DK_CMD_SIZE, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached);
-    if (!s_dk.set_ring[1] || !s_dk.set_cmd[1] || !s_dk.set_cmd_spare[1]) {
-        dk_log("second frame set unavailable: presents stay synchronous\n");
-        s_dk.set_ring[1] = NULL;
+    s_dk.n_sets = 1;
+    for (int i = 1; i < DK_SETS; i++) {
+        s_dk.set_ring[i] = dk_block(DK_RING_SIZE, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached);
+        s_dk.set_cmd[i] = dk_block(DK_CMD_SIZE, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached);
+        s_dk.set_cmd_spare[i] = dk_block(DK_CMD_SIZE, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached);
+        if (!s_dk.set_ring[i] || !s_dk.set_cmd[i] || !s_dk.set_cmd_spare[i]) {
+            dk_log("frame set %d unavailable: %d set(s) in use\n", i, s_dk.n_sets);
+            s_dk.set_ring[i] = NULL;
+            break;
+        }
+        s_dk.n_sets = i + 1;
     }
+    if (s_dk.n_sets < 2) s_dk.set_ring[1] = NULL;   /* synchronous presents */
     gt_init();
     { FILE* ps = fopen("sdmc:/switch/dbz-budokai-3-switch/present-sync", "r");
       s_dk.async_present = !ps;
@@ -2611,7 +2684,8 @@ static int dk_init_device(u32 width, u32 height)
     dk_log("depth clamp %s\n", s_dk.depth_clamp ? "on" : "off");
     dk_log("texbatch %s, flush every %u ops\n", s_dk.texbatch_off ? "off" : "on", s_dk.flush_ops);
     dk_log("present: %s\n", s_dk.async_present && s_dk.set_ring[1]
-                              ? "asynchronous (2 frame sets)" : "synchronous");
+                              ? "asynchronous (frame sets in flight)" : "synchronous");
+    dk_log("frame sets: %d\n", s_dk.n_sets);
     s_dk.mem_desc = dk_block(DK_DESC_SIZE, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached);
     if (!s_dk.mem_code || !s_dk.mem_ring || !s_dk.mem_desc) {
         dk_log("memory blocks: code=%p ring=%p desc=%p (out of heap?)\n",
