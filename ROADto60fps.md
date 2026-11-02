@@ -23,7 +23,7 @@ Il lavoro precedente puntava a 30 FPS. Il budget ora si dimezza: ogni ms conta i
 **Ancora da fare**
 1. Misura del margine con `diag.on` (tempo GPU `t31`, CPU per thread `t25`) nello stesso duello; da dove vengono i picchi GPU.
 2. ~~Shader mancanti di Freezer~~: catturati e aggiunti (`dc0dfea`).
-3. Bug degli scatti nelle animazioni (aperto dalle funzioni native del 31 ottobre–1 novembre, rimandato fino ai 60 FPS).
+3. ~~Scatti nelle animazioni~~: spariti con il duello stabile a 60 Hz (prova dell'utente, 2 novembre). Causa probabile: prima il passaggio 30/60 e le passate con 1 o 3 passi di logica facevano avanzare le animazioni in modo irregolare.
 4. Mappa DU e schermata livello: non più misurate dall'inizio del lavoro sui 60 FPS.
 5. ~~Audio che gracchia~~: risolto con il ritmo regolare dei blocchi (vedi registro, `audio-steady`).
 

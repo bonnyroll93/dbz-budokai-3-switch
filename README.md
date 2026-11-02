@@ -84,6 +84,10 @@ screen after a DU fight (both ~30 FPS or lower at the start).
   music blocks). Blocks are now mixed on a steady 5.33 ms clock
   (`audio-steady-off` on the SD restores the old pacing).
 - **Missing Freezer shaders**: the two vertex shaders were captured and added.
+- **Animation jerks**: characters no longer jerk or run out of step (user test,
+  2 November 2026). Probable reason: duels now stay at 60 Hz with one logic
+  step per image, instead of switching between 30 and 60 Hz with uneven step
+  counts.
 - **NSP failed to install** with a progressive JPEG icon. The packager now
   accepts only a baseline 256x256 JPEG and stops with a clear message otherwise.
 - **Saves outside the port folder**: earlier builds wrote them to
@@ -96,9 +100,6 @@ screen after a DU fight (both ~30 FPS or lower at the start).
 
 ### Known bugs
 
-- **Animation jerks.** Since the native draw functions, characters sometimes
-  jerk or their animation runs out of step with the gameplay. Not isolated yet;
-  test plan: turn the natives off one group at a time with the SD switches.
 - **Dragon Universe, UI.** Several menus flicker or are drawn twice, with the
   second copy offset.
 - **Dragon Universe, skin.** The character's skin is rendered white, only on the
@@ -111,7 +112,6 @@ screen after a DU fight (both ~30 FPS or lower at the start).
 
 ### Next goals
 
-- The animation jerks.
 - More headroom in duels: images often arrive just in time, so heavier scenes
   (other stages, transformations, beam struggles) may still drop frames.
 - 60 FPS on the DU map and the level screen.
