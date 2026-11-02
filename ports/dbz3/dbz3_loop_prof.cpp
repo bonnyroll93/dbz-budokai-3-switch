@@ -377,23 +377,40 @@ uint64_t g_step_acc = 0;
  * rate instead, 30 Hz (2 logic steps per image) or 60 Hz (1 step). Called just
  * before the flip; sleeps until the next slot.
  *
- * The choice is made on the cost of a 60 Hz image: the work since the last
- * flip minus the extra logic steps run in it. At 30 Hz the work holds two
- * steps, so comparing it with a 60 Hz budget (as before run100) asked for
- * ~10.7 ms where 16.7 ms is enough. Up to 60 Hz when the estimate averages
- * below kPaceUpUs, back to 30 Hz when it averages above kPaceDownUs; after a
- * drop, 60 Hz is not tried again for kPaceHoldFrames images.
+ * The choice is made on the measured cost of a 60 Hz image (the work since
+ * the last flip minus any extra logic steps run in it). At 30 Hz that cost is
+ * only an estimate, and run133 showed it 5-8 ms too high (17-21 ms estimated,
+ * 8-13 ms measured at 60 Hz in the same duel), which kept the game at 30 Hz.
+ * So 60 Hz is tried rather than predicted: at 30 Hz, once the estimate is
+ * below kPaceProbeUs, switch to 60 Hz for kPaceProbeFrames images and keep it
+ * if the measured cost averages at most kPaceDownUs. A failed try waits
+ * twice as long before the next one (kPaceBackoffMin..Max images); at 60 Hz,
+ * a measured average above kPaceDownUs drops back to 30 Hz.
  */
-constexpr double kPaceUpUs = 15500.0;   /* run100: flipped every ~4 s at 15500 (renderer-bound then); back to 15500 after the 3 frame sets (run113) */
+constexpr double kPaceProbeUs = 20000.0;
 constexpr double kPaceDownUs = 16700.0;
-constexpr uint32_t kPaceHoldFrames = 120;
+constexpr uint32_t kPaceProbeFrames = 60;        /* ~1 s at 60 Hz */
+constexpr uint32_t kPaceBackoffMin = 60;         /* images at 30 Hz: 2 s */
+constexpr uint32_t kPaceBackoffMax = 900;        /* 30 s */
 uint64_t g_pace_target = 0;      /* ticks of the current slot */
 uint64_t g_pace_interval_us = 16667;
 double g_pace_work_ema = 0.0;    /* whole image, for the log */
 double g_pace_est_ema = 0.0;     /* image without its extra logic steps */
 uint64_t g_pace_extra_ticks = 0; /* extra logic steps since the last flip */
-uint32_t g_pace_hold = 0;
+uint32_t g_pace_hold = 0;        /* images before the next try at 60 Hz */
+uint32_t g_pace_backoff = kPaceBackoffMin;
+uint32_t g_pace_probe = 0;       /* images left in a 60 Hz try (0: not trying) */
+uint32_t g_pace_at60 = 0;        /* images since the switch to 60 Hz */
 uint64_t g_pace_sleep_us = 0, g_pace_late = 0, g_pace_switches = 0;
+uint64_t g_pace_tries = 0, g_pace_kept = 0;
+
+static void pace_back_to_30(void)
+{
+    g_pace_interval_us = 33333;
+    g_pace_hold = g_pace_backoff;
+    g_pace_backoff = g_pace_backoff * 2u > kPaceBackoffMax ? kPaceBackoffMax : g_pace_backoff * 2u;
+    g_pace_switches++;
+}
 
 void pace_before_flip(void)
 {
@@ -404,14 +421,32 @@ void pace_before_flip(void)
         const double est = work > extra ? work - extra : 0.0;
         g_pace_work_ema = g_pace_work_ema == 0.0 ? work : g_pace_work_ema * 0.9 + work * 0.1;
         g_pace_est_ema = g_pace_est_ema == 0.0 ? est : g_pace_est_ema * 0.9 + est * 0.1;
-        if (g_pace_hold) g_pace_hold--;
-        if (g_pace_interval_us == 16667 && g_pace_est_ema > kPaceDownUs) {
-            g_pace_interval_us = 33333;
-            g_pace_hold = kPaceHoldFrames;
-            g_pace_switches++;
-        } else if (g_pace_interval_us != 16667 && !g_pace_hold && g_pace_est_ema < kPaceUpUs) {
-            g_pace_interval_us = 16667;
-            g_pace_switches++;
+        if (g_pace_interval_us == 16667) {
+            g_pace_at60++;
+            if (g_pace_probe) {
+                if (--g_pace_probe == 0) {
+                    if (g_pace_est_ema <= kPaceDownUs) {         /* the try held */
+                        g_pace_kept++;
+                        g_pace_backoff = kPaceBackoffMin;
+                    } else {
+                        pace_back_to_30();                       /* wait longer next time */
+                    }
+                }
+            } else if (g_pace_est_ema > kPaceDownUs) {
+                /* Held a while: the scene got heavier, start over at the
+                 * shortest wait. Otherwise keep backing off. */
+                if (g_pace_at60 > 600u) g_pace_backoff = kPaceBackoffMin;
+                pace_back_to_30();
+            }
+        } else {
+            if (g_pace_hold) g_pace_hold--;
+            if (!g_pace_hold && g_pace_est_ema < kPaceProbeUs) {
+                g_pace_interval_us = 16667;
+                g_pace_probe = kPaceProbeFrames;
+                g_pace_at60 = 0;
+                g_pace_tries++;
+                g_pace_switches++;
+            }
         }
     }
     g_pace_extra_ticks = 0;
@@ -437,13 +472,15 @@ void pace_before_flip(void)
     static uint32_t n = 0;
     if (++n % 150u == 0 && g_log) {
         fprintf(g_log, "  pace interval_us=%llu work_ema_us=%.0f sleep_us/frame=%.0f late=%llu/150"
-                       " est60_ema_us=%.0f switches=%llu\n",
+                       " est60_ema_us=%.0f switches=%llu tries=%llu kept=%llu\n",
                 (unsigned long long)g_pace_interval_us, g_pace_work_ema,
                 (double)g_pace_sleep_us / 150.0, (unsigned long long)g_pace_late,
-                g_pace_est_ema, (unsigned long long)g_pace_switches);
+                g_pace_est_ema, (unsigned long long)g_pace_switches,
+                (unsigned long long)g_pace_tries, (unsigned long long)g_pace_kept);
         g_pace_sleep_us = 0;
         g_pace_late = 0;
         g_pace_switches = 0;
+        g_pace_tries = g_pace_kept = 0;
     }
 }
 
