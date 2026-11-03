@@ -77,6 +77,21 @@ screen after a DU fight (both ~30 FPS or lower at the start).
 
 ### Fixed recently
 
+- **Dragon Universe, white skin.** The map's skin shader blends towards the fog
+  colour by `fog.y`, which on the RSX is the fog factor the hardware computes
+  from `SET_FOG_MODE` and `SET_FOG_PARAMS`. The port passed the raw fog
+  coordinate instead. The engine now hands mode and parameters to the pixel
+  shaders (`fp_alpha.yzw`) and the shader translator computes the factor with
+  RPCS3's formulas. The other fog-reading map shaders get the same fix.
+- **Blue opening movie.** The movie's YUV to RGB shader came out blue and
+  flashed white on the Switch although every input read alone was right
+  (planes, constants, vertex colour checked on the GPU, run141-146). It is
+  replaced by an override with the BT.601 constants the game always uploads
+  written in the code (`ps_3a9c050fe20a0ac2`); why reading them from the
+  constant buffer in that formula fails is still open.
+- **Boot text.** The boot no longer prints the runner's console text: the
+  screen stays black until the game draws. The text console comes up only
+  when the boot stops on an error.
 - **Crackling audio** in music, effects and voices. The read position of the
   audio ring advanced in bursts, paced by the Switch output buffers; the
   game's sound engine and its music mixer then wrote one block twice and
@@ -102,10 +117,11 @@ screen after a DU fight (both ~30 FPS or lower at the start).
 
 - **Dragon Universe, UI.** Several menus flicker or are drawn twice, with the
   second copy offset.
-- **Dragon Universe, skin.** The character's skin is rendered white, only on the
-  map. The same textures render correctly in the character select screen and in
-  duels, which use a different pixel shader variant; the map variant is the
-  suspect.
+- **Opening movie stutters.** The game moves to a new movie frame only 8-10
+  times per second instead of 30 (`movie` line in `t23-draw-prof.log`). The
+  Sofdec decoder runs on two translated SPU threads ("SPU Delegate", ~88% of a
+  core each), about half of it in a loop that waits for work
+  (`0x19D98`, polling `0x1F520` while it answers busy).
 - **Dragon Universe, flying.** At maximum flight speed, white pixel artifacts
   sometimes appear on screen.
 - **Audio reverb** is disabled to save CPU (`reverb.on` turns it back on).
@@ -299,7 +315,7 @@ The defaults are the best settings: no file is needed to play.
 | `diag.on` | Verbose diagnostics, GPU and thread logs (`t22`, `t25`, `t31`; needs `Lightweight = $false`). Without it those logs are old copies. |
 | `fps-off` | Hides the FPS counter until the debug settings are first saved. |
 | `depth-clamp` | Depth clamp on (A/B test for terrain lost to near/far clipping). |
-| `map-capture-after` | Dumps the DU map draw passes (debug). |
+| `map-capture-after` | Number of seconds: dumps the draw passes from then on (debug, non-light builds). `draws.txt` lists each draw's textures (with remap, pitch, filter), vertex attributes and fragment constants; `tex_*.raw` are the guest bytes of each texture. |
 
 **Native code** (guest functions replaced by native C++; each one falls back to
 the translated PS3 code when its file exists)
@@ -335,6 +351,7 @@ the translated PS3 code when its file exists)
 | `flush512` | Submits GPU work every 512 operations mid-frame (older behaviour). |
 | `texbatch-off` | One GPU wait per texture chunk (older behaviour). |
 | `texhash-per-use` | Re-hashes small textures on every use (older behaviour). |
+| `tex-hot-off` | Large textures that just changed go back to the sampled change check (by default they are hashed in full for 2 s after a change). |
 | `du-full-extra` | Runs the whole DU task in the extra logic pass instead of only its update part. |
 | `repeat-draw-off` | Disables the repeated extra run of the DU draw task. |
 
