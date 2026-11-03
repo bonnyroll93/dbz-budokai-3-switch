@@ -77,6 +77,16 @@ screen after a DU fight (both ~30 FPS or lower at the start).
 
 ### Fixed recently
 
+- **Dragon Universe, UI drawn twice.** On the map the Dragon Ball bar (Triangle)
+  flickered as if a second bar, offset to the right, appeared for one image;
+  at FRAME CAP 30 it stayed on screen. The ghost showed in the image after
+  every scheduler pass that ran more than one logic step (run157). Task
+  `0x001D16C8` writes no GCM commands, so Logic60 ran it again in the extra
+  steps, but it queues 2D sprites that draw task `0x001D1648` draws once per
+  image: run twice, the bar was queued twice. A test build that skipped one
+  extra-step task at a time found it (run158: no ghost with it skipped). It is
+  now in `kNoRepeat` (`dbz3_loop_prof.cpp`) and runs once per image, as on the
+  PS3. No FPS cost (user test, light build).
 - **Dragon Universe, white skin.** The map's skin shader blends towards the fog
   colour by `fog.y`, which on the RSX is the fog factor the hardware computes
   from `SET_FOG_MODE` and `SET_FOG_PARAMS`. The port passed the raw fog
@@ -115,24 +125,26 @@ screen after a DU fight (both ~30 FPS or lower at the start).
 
 ### Known bugs
 
-- **Dragon Universe, UI.** Several menus flicker or are drawn twice, with the
-  second copy offset. Seen by the user: opening the map (Triangle), the bar
-  holding the Dragon Balls flickers as if a second, offset bar appeared and
-  disappeared; opening concentration mode (R), a second image flashes in the
-  same way. Findings (run149-153): the layers of the bar (same texture, same X
-  when still) are drawn from two vertex rings the title alternates per frame
-  (`0x00F80000`, `0x01088000`), and in a doubled frame some layers already
-  hold the next position. At FRAME CAP 30 (two logic steps every image) the
-  second bar stays on screen, so the extra Logic60 steps are involved;
-  `du-full-extra` makes it worse. Not the cause: `repeat-draw-off`, the FIFO
-  lagging behind the previous flip, missing memory barriers. Tried and
-  reverted: waiting for the previous frame's flip, and flushing the regular
-  pass before each extra step (no fix, lower FPS).
 - **Opening movie stutters.** The game moves to a new movie frame only 8-10
   times per second instead of 30 (`movie` line in `t23-draw-prof.log`). The
   Sofdec decoder runs on two translated SPU threads ("SPU Delegate", ~88% of a
   core each), about half of it in a loop that waits for work
   (`0x19D98`, polling `0x1F520` while it answers busy).
+  Findings (code reading, nothing built yet): `0x1F520` is
+  `sys_spu_thread_send_event`, and the busy answer (`0x8001000A`) means the
+  PPU event queue is full (`spu_deliver_user_event` ->
+  `sys_event_queue_push_by_id` in `lv2_register.c`). The decoder retries at
+  once in a tight loop (`0x19E18`), so the bottleneck looks like the PPU
+  thread (CRI side) that drains the queue, not the decoding itself. Open
+  question: is that thread slow because the two spinning SPU threads take its
+  CPU (then sleeping on a full queue instead of spinning would help), or
+  because it waits on something else (then only profiling it will tell)?
+  Next steps, not done yet: count full-queue answers per second with the queue
+  size and the reading thread; when the queue is full, let only the
+  "SPU Delegate" threads sleep briefly before answering busy (with a switch to
+  turn it off), checking the duel FPS too. A cheap test with no code change:
+  a CPU overclock only as a test. If the movie gains about in proportion, the
+  PPU lacks CPU; if not, it is waiting on something else.
 - **Dragon Universe, flying.** At maximum flight speed, white pixel artifacts
   sometimes appear on screen.
 - **Audio reverb** is disabled to save CPU (`reverb.on` turns it back on).

@@ -810,7 +810,13 @@ extern "C" void ps3_indirect_call(ppu_context* ctx);
 /* run29: excluding 0x000D1490 did not help (corruption then showed after
  * 0x946E8 again) and made animations stutter, so it runs twice again; the
  * allocator trace (dbz3_heap_trace.cpp) is to find the buffer's owner. */
-constexpr uint32_t kNoRepeat[] = { 0u /* none */ };
+/*   0x001D16C8  DU UI (3 objects per pass): no GCM writes, but it queues 2D
+ *               sprites (0x0005C768/0x0005C870) that draw task 0x001D1648
+ *               draws once per frame. Run twice, the queue holds the Dragon
+ *               Ball bar twice and the next frame shows a second, offset bar
+ *               (run157: a ghost after every multi-step pass; run158: none
+ *               with this task skipped in the extra steps). */
+constexpr uint32_t kNoRepeat[] = { 0x001D16C8u };
 
 int no_repeat(uint32_t fn)
 {
