@@ -118,21 +118,26 @@ int ps3_switch_app_init(void)
         ps3_switch_app_hold("Cannot create /switch/dbz-budokai-3-switch on SD");
         return 0;
     }
-    /* A numeric delay in seconds arms one short per-pass GPU capture. Keep
-     * this separate from diag.on: readback stalls make FPS measurements invalid. */
+    /* A numeric delay in seconds arms one short per-pass GPU capture; an
+     * optional second number is how many passes to keep (default 24, up to
+     * 400). Keep this separate from diag.on: readback stalls make FPS
+     * measurements invalid. */
 #ifndef PORT_DBZ3_LIGHT_BUILD
     {
         FILE *capture = fopen("sdmc:/switch/dbz-budokai-3-switch/map-capture-after", "r");
         if (capture) {
-            unsigned after = 0;
+            unsigned after = 0, passes = 24;
             if (fscanf(capture, "%u", &after) == 1 && after > 0 && after <= 3600) {
+                if (fscanf(capture, "%u", &passes) != 1 || passes == 0 || passes > 400)
+                    passes = 24;
                 const char *dir = "sdmc:/switch/dbz-budokai-3-switch/map-pass-dump";
-                char delay[16];
+                char delay[16], max_passes[16];
                 snprintf(delay, sizeof delay, "%u", after);
+                snprintf(max_passes, sizeof max_passes, "%u", passes);
                 if (mkdir(dir, 0777) == 0 || errno == EEXIST) {
                     setenv("RSX_ENGINE_PASS_DUMP", dir, 1);
                     setenv("RSX_ENGINE_PASS_DUMP_AFTER", delay, 1);
-                    setenv("RSX_ENGINE_PASS_DUMP_MAX", "24", 1);
+                    setenv("RSX_ENGINE_PASS_DUMP_MAX", max_passes, 1);
                     setenv("RSX_ENGINE_PASS_DUMP_DRAWS", "1", 1);
                     printf("Map pass capture armed after %u s\n", after);
                 }

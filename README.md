@@ -116,7 +116,18 @@ screen after a DU fight (both ~30 FPS or lower at the start).
 ### Known bugs
 
 - **Dragon Universe, UI.** Several menus flicker or are drawn twice, with the
-  second copy offset.
+  second copy offset. Seen by the user: opening the map (Triangle), the bar
+  holding the Dragon Balls flickers as if a second, offset bar appeared and
+  disappeared; opening concentration mode (R), a second image flashes in the
+  same way. Findings (run149-153): the layers of the bar (same texture, same X
+  when still) are drawn from two vertex rings the title alternates per frame
+  (`0x00F80000`, `0x01088000`), and in a doubled frame some layers already
+  hold the next position. At FRAME CAP 30 (two logic steps every image) the
+  second bar stays on screen, so the extra Logic60 steps are involved;
+  `du-full-extra` makes it worse. Not the cause: `repeat-draw-off`, the FIFO
+  lagging behind the previous flip, missing memory barriers. Tried and
+  reverted: waiting for the previous frame's flip, and flushing the regular
+  pass before each extra step (no fix, lower FPS).
 - **Opening movie stutters.** The game moves to a new movie frame only 8-10
   times per second instead of 30 (`movie` line in `t23-draw-prof.log`). The
   Sofdec decoder runs on two translated SPU threads ("SPU Delegate", ~88% of a
