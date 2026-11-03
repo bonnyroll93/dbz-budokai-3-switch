@@ -260,6 +260,25 @@ def rewrite_guarded_div(src):
             out.append(src[i:j + 1])
             i = j + 1
 
+# The RSX hands a fragment program's FOGC input as (fog coordinate, fog
+# factor, 0, 0): the factor comes from SET_FOG_MODE and SET_FOG_PARAMS, which
+# the draw engine puts in fp_alpha.yzw. Same formulas as RPCS3
+# (RSXFragmentPrologue.glsl, fetch_fog_value). Done here so the captured HLSL
+# text, and so its hash, stays as the backend sees it.
+FOG_FN = """vec4 rsx_fog_value(float c) {
+    float mode = fp_alpha.y, p0 = fp_alpha.z, p1 = fp_alpha.w;
+    float f;
+    if (mode == 9729.0)      f = p1 * c + (p0 - 1.0);                              /* LINEAR */
+    else if (mode == 2048.0) f = exp(11.084 * (p1 * c + p0 - 1.5));                /* EXP */
+    else if (mode == 2049.0) f = exp(-pow(4.709 * (p1 * c + p0 - 1.5), 2.0));      /* EXP2 */
+    else if (mode == 2050.0) f = exp(11.084 * (p1 * abs(c) + p0 - 1.5));           /* EXP_ABS */
+    else if (mode == 2051.0) f = exp(-pow(4.709 * (p1 * abs(c) + p0 - 1.5), 2.0)); /* EXP2_ABS */
+    else if (mode == 2052.0) f = p1 * abs(c) + (p0 - 1.0);                         /* LINEAR_ABS */
+    else return vec4(c, 0.0, 0.0, 0.0);
+    return vec4(c, clamp(f, 0.0, 1.0), 0.0, 0.0);
+}"""
+
+
 def translate(hlsl, stage):
     src = hlsl.replace("\r\n", "\n")
     src = re.sub(r"\[(unroll|loop|branch|flatten)\]\s*", "", src)
@@ -338,9 +357,14 @@ def translate(hlsl, stage):
             else:
                 raise TranslateError("VS output semantic %s" % sem)
     else:
+        has_fog_consts = re.search(r"\bfp_alpha\b", "\n".join(decls)) is not None
         for typ, fname, sem in structs[in_type]:
             if sem == "SV_POSITION":
                 entry.append("    hin.%s = vec4(gl_FragCoord.xyz, 1.0 / gl_FragCoord.w);" % fname)
+            elif sem == "FOG" and has_fog_consts:
+                shell.append("layout(location = %d) in vec4 rsx_v%d;" % (VARYING_LOC[sem], VARYING_LOC[sem]))
+                shell.append(FOG_FN)
+                entry.append("    hin.%s = rsx_fog_value(rsx_v%d.x);" % (fname, VARYING_LOC[sem]))
             elif sem in VARYING_LOC:
                 shell.append("layout(location = %d) in vec4 rsx_v%d;" % (VARYING_LOC[sem], VARYING_LOC[sem]))
                 entry.append("    hin.%s = rsx_v%d;" % (fname, VARYING_LOC[sem]))

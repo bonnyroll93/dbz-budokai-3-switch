@@ -3556,7 +3556,13 @@ static void sink_end(void* user, const rsx_dispatch* r)
         memcpy(g.fp_cb, g.fp_constants.values, g.fp_constants.count * 16u);
     { float* alpha = (float*)(g.fp_cb + nslots * 16u);
       alpha[0] = rsx_fp_alpha_ref(rs.alpha_ref_raw, rs.alpha_ref_format);
-      alpha[1] = alpha[2] = alpha[3] = 0.0f; }
+      /* Fog for the FOGC input: mode (SET_FOG_MODE) and the two float params
+       * (SET_FOG_PARAMS). gen-deko3d-shaders.py turns them into the fog
+       * factor the RSX hands the fragment program in fog.y. */
+      const u32 fog_p0 = rsx_dsp_reg(&g.rsx, 0x08D0), fog_p1 = rsx_dsp_reg(&g.rsx, 0x08D4);
+      alpha[1] = (float)rsx_dsp_reg(&g.rsx, 0x08CC);
+      memcpy(&alpha[2], &fog_p0, 4);
+      memcpy(&alpha[3], &fog_p1, 4); }
 
     ENG_SEC(4);
     pd_note(targets, n_targets, zslot, &rs, pipeline, tex_mask);
