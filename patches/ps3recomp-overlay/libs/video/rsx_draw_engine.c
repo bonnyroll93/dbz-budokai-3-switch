@@ -34,6 +34,11 @@
 #ifdef __SWITCH__
 static inline u64 eng_tick(void) { u64 t; __asm__ volatile("mrs %0, cntpct_el0" : "=r"(t)); return t; }
 static u64 s_tex_hash_ticks, s_tex_hash_bytes, s_tex_hash_calls, s_tex_uploads;
+/* Movie frames (OPENING.SFD luma: B8 960x720) reaching the renderer: count,
+ * presents between two new frames (1, 2, 3, 4+), longest gap. */
+static u64 s_mov_frames, s_mov_gap[4], s_mov_max_gap_us, s_mov_last_tick;
+static u64 s_mov_switches;   /* the game moving to another of its movie buffers */
+static u32 s_mov_last_frame;
 static u64 s_tex_lookup_ticks, s_tex_lookup_calls, s_tex_lookup_hits;
 static u64 s_tex_lookup_entries, s_tex_upload_ticks;
 /* Vertex fetch split (t23-draw-prof.log): cache key, index read, duplicate
@@ -1122,6 +1127,18 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
     }
 #ifdef __SWITCH__
     s_tex_uploads++;
+    if ((fmt & 0x9Fu) == 0x81u && w == 960u && h == 720u) {
+        const u64 t = eng_tick();
+        if (s_mov_last_tick) {
+            const u32 d = g.frames - s_mov_last_frame;
+            s_mov_gap[d >= 4u ? 3u : (d ? d - 1u : 0u)]++;
+            const u64 us = (t - s_mov_last_tick) * 5ull / 96ull;
+            if (us > s_mov_max_gap_us) s_mov_max_gap_us = us;
+        }
+        s_mov_last_tick = t;
+        s_mov_last_frame = g.frames;
+        s_mov_frames++;
+    }
 #endif
     return handle;
 }
@@ -1227,6 +1244,10 @@ static u32 eng_texture_slot(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
 #ifdef __SWITCH__
     const u64 lookup_t0 = eng_tick();
     s_tex_lookup_calls++;
+    if ((fmt & 0x9Fu) == 0x81u && w == 960u && h == 720u) {
+        static u32 s_mov_last_offset;
+        if (offset != s_mov_last_offset) { s_mov_switches++; s_mov_last_offset = offset; }
+    }
 #endif
     const u32 hint_slot = eng_tex_hint_slot(location, offset, fmt, w, h);
     const u32 hint = s_tex_hint[hint_slot];
@@ -2991,8 +3012,68 @@ static void pd_note(const u32* targets, u32 n_targets, u32 zslot,
             if (!(tex_mask & (1u << u))) continue;
             rsx_dsp_texture t;
             rsx_dsp_get_texture(&g.rsx, u, &t);
-            fprintf(s_pd.draws_log, " t%u %u:0x%08X f%02X %ux%u", u, t.location, t.offset,
-                    t.format & 0xFFu, t.width, t.height);
+            fprintf(s_pd.draws_log, " t%u %u:0x%08X f%02X %ux%u remap %08X pitch %u filter %08X",
+                    u, t.location, t.offset, t.format & 0xFFu, t.width, t.height,
+                    t.remap, t.pitch, t.filter);
+            /* The guest bytes of each distinct texture (up to 32, 4 MB each),
+             * as the engine reads them: tex_<loc>_<offset>_<w>x<h>_f<fmt>_p<pitch>.raw */
+            static u32 s_dumped[32][2];
+            static u32 s_n_dumped;
+            int seen = 0;
+            for (u32 k = 0; k < s_n_dumped; k++)
+                seen |= s_dumped[k][0] == t.offset && s_dumped[k][1] == t.location;
+            if (!seen && s_n_dumped < 32u) {
+                s_dumped[s_n_dumped][0] = t.offset;
+                s_dumped[s_n_dumped][1] = t.location;
+                s_n_dumped++;
+                const u32 span = eng_texture_span(t.format, t.width, t.height,
+                                                  t.mipmaps ? t.mipmaps : 1u, t.pitch,
+                                                  t.cubemap != 0);
+                const u8* src = (span && span <= (4u << 20))
+                    ? eng_guest_ptr(NULL, t.location, t.offset, span) : NULL;
+                if (src) {
+                    char path[512];
+                    snprintf(path, sizeof path, "%s/tex_%u_%08X_%ux%u_f%02X_p%u.raw", s_pd.dir,
+                             t.location, t.offset, t.width, t.height, t.format & 0xFFu, t.pitch);
+                    FILE* f = fopen(path, "wb");
+                    if (f) { fwrite(src, 1, span, f); fclose(f); }
+                }
+            }
+        }
+        /* Vertex attributes 0, 3 (COL0) and 8 (TEX0): layout, then the first
+         * vertex's raw bytes, or the fixed value of a disabled attribute. */
+        {
+            static const u32 k_attrs[3] = { 0u, 3u, 8u };
+            const u32 base = rsx_dsp_vertex_data_base_offset(&g.rsx);
+            for (u32 k = 0; k < 3u; k++) {
+                rsx_dsp_vertex_attr a;
+                rsx_dsp_get_vertex_attr(&g.rsx, k_attrs[k], &a);
+                if (!a.type || !a.size) {
+                    float d[4];
+                    rsx_dsp_vertex_default(&g.rsx, k_attrs[k], d);
+                    fprintf(s_pd.draws_log, " | a%u off default %g,%g,%g,%g", k_attrs[k],
+                            d[0], d[1], d[2], d[3]);
+                    continue;
+                }
+                fprintf(s_pd.draws_log, " | a%u type %u size %u stride %u freq %u %u:0x%08X+0x%X",
+                        k_attrs[k], a.type, a.size, a.stride, a.frequency, a.location,
+                        a.offset, base);
+                const u8* vb = eng_guest_ptr(NULL, a.location, a.offset + base, 16u);
+                if (vb) {
+                    fprintf(s_pd.draws_log, " bytes");
+                    for (u32 b = 0; b < 16u; b++) fprintf(s_pd.draws_log, " %02X", vb[b]);
+                }
+            }
+        }
+        /* Fragment constants as this draw uploads them (up to 16). */
+        if (g.fp_constants.count) {
+            const u32 nc = g.fp_constants.count < 16u ? g.fp_constants.count : 16u;
+            fprintf(s_pd.draws_log, " | fpc");
+            for (u32 k = 0; k < nc; k++) {
+                float c[4];
+                memcpy(c, g.fp_constants.values[k], sizeof c);
+                fprintf(s_pd.draws_log, " %u:%g,%g,%g,%g", k, c[0], c[1], c[2], c[3]);
+            }
         }
         fprintf(s_pd.draws_log, "\n");
     }
@@ -3100,6 +3181,14 @@ static void eng_draw_prof_window(void)
                 (unsigned long long)s_vc_hits, (unsigned long long)s_vc_misses,
                 (unsigned long long)s_vc_stores, (unsigned long long)s_vc_uncacheable,
                 (unsigned long long)(s_vc_hashed >> 10), (unsigned long long)(s_vc_bytes >> 20));
+        if (s_mov_frames || s_mov_switches)
+            fprintf(f, "  movie buffer_switches=%llu frames=%llu gap_presents 1:%llu 2:%llu 3:%llu 4+:%llu max_gap_ms=%llu\n",
+                    (unsigned long long)s_mov_switches,
+                    (unsigned long long)s_mov_frames, (unsigned long long)s_mov_gap[0],
+                    (unsigned long long)s_mov_gap[1], (unsigned long long)s_mov_gap[2],
+                    (unsigned long long)s_mov_gap[3], (unsigned long long)(s_mov_max_gap_us / 1000ull));
+        s_mov_frames = s_mov_max_gap_us = s_mov_switches = 0;
+        memset(s_mov_gap, 0, sizeof s_mov_gap);
         fprintf(f, "  fetch_split key_ms=%llu refs_ms=%llu remap_ms=%llu prepare_ms=%llu"
                 " decode_ms=%llu store_ms=%llu decoded_verts=%llu\n",
                 (unsigned long long)(s_fsub[0] / 19200ull), (unsigned long long)(s_fsub[1] / 19200ull),
