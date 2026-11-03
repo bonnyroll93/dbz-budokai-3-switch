@@ -125,6 +125,17 @@ screen after a DU fight (both ~30 FPS or lower at the start).
 
 ### Known bugs
 
+- **White rim around face lines (minor).** In close-ups (Goku on the result
+  screen) the eye, brow and nose lines have a thin white edge. Draw capture
+  (run160-decal): the lines are a DXT3 atlas (`0x05A5DA80`, 256x256) drawn by
+  the character program (`fp 01A7A580`) with `SRC_ALPHA/ONE_MINUS_SRC_ALPHA`
+  blending, linear filtering and no alpha test, and its transparent texels are
+  white (58k of 61k). Filtering mixes that white into the line edges. The port
+  applies the game's format, filter and blend as given; FXAA is not the cause.
+  Tried and reverted: alpha bleeding of the white fill for every DXT3/DXT5
+  texture at upload (made other scenes worse). Possible fixes, narrower: bleed
+  only the face atlases (by address or content), or filter with premultiplied
+  alpha in the shader for that program's blended draws only.
 - **Opening movie stutters.** The game moves to a new movie frame only 8-10
   times per second instead of 30 (`movie` line in `t23-draw-prof.log`). The
   Sofdec decoder runs on two translated SPU threads ("SPU Delegate", ~88% of a
