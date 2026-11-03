@@ -132,6 +132,10 @@ $nacpPath = Join-Path $control 'control.nacp'
 $nacp = [IO.File]::ReadAllBytes($nacpPath)
 if ($nacp.Length -ne 0x4000) { throw "Unexpected control.nacp size $($nacp.Length)" }
 $nacp[0x3025] = 1
+# 0x3034 Screenshot (0 = allowed), 0x3035 VideoCapture (2 = enabled): the
+# Capture button takes screenshots and, held down, records the last 30 s.
+$nacp[0x3034] = 0
+$nacp[0x3035] = 2
 [BitConverter]::GetBytes([Convert]::ToUInt64($titleId, 16)).CopyTo($nacp, 0x3078)
 [BitConverter]::GetBytes([UInt64](32MB)).CopyTo($nacp, 0x3080)
 [BitConverter]::GetBytes([UInt64](16MB)).CopyTo($nacp, 0x3088)
