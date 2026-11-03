@@ -14,6 +14,17 @@ static const char *const status_log =
     "sdmc:/switch/dbz-budokai-3-switch/t19-status.log";
 static int sd_ready;
 static int graphics_ready;
+/* The text console stays off: the boot shows a black screen. It comes up
+ * only when the boot stops on an error (ps3_switch_app_hold). */
+static int console_on;
+
+static void console_show(void)
+{
+    if (!console_on && !graphics_ready) {
+        consoleInit(NULL);
+        console_on = 1;
+    }
+}
 
 /* Effect-list guards in postprocess-lift.py count what they skip here: first
  * node, derived address, next link, lookup. Logged by the deko3d stats line. */
@@ -22,7 +33,8 @@ unsigned g_dbz3_du_rejects[4];
 void ps3_switch_app_prepare_display(void)
 {
     if (!graphics_ready) {
-        consoleExit(NULL);
+        if (console_on) consoleExit(NULL);
+        console_on = 0;
         graphics_ready = 1;
     }
 }
@@ -44,11 +56,12 @@ void ps3_switch_app_stage(const char *stage)
     }
     fprintf(stdout, "[T19] %s\n", stage);
     fflush(stdout);
-    if (!graphics_ready) consoleUpdate(NULL);
+    if (console_on && !graphics_ready) consoleUpdate(NULL);
 }
 
 void ps3_switch_app_hold(const char *reason)
 {
+    console_show();
     ps3_switch_app_stage(reason);
     fprintf(stderr, "[T19] %s\n", reason);
     fflush(stderr);
@@ -59,7 +72,7 @@ void ps3_switch_app_hold(const char *reason)
         padUpdate(&pad);
         if (padGetButtonsDown(&pad) & HidNpadButton_Plus)
             break;
-        if (!graphics_ready) consoleUpdate(NULL);
+        if (console_on && !graphics_ready) consoleUpdate(NULL);
         svcSleepThread(50000000);
     }
 }
@@ -71,8 +84,6 @@ static void switch_runner_on_exit(void)
 
 int ps3_switch_app_init(void)
 {
-    consoleInit(NULL);
-    printf("Budokai BLUS30966 T19 runner\n");
     /* libnx normally mounts sdmc in __appInit. Mount it only when absent. */
     Result rc = 0;
     if (!fsdevGetDeviceFileSystem("sdmc"))
@@ -133,10 +144,6 @@ int ps3_switch_app_init(void)
         fputs("T19 diagnostic runner started\n", status);
         fclose(status);
     }
-    printf("Game: %s\n", game_elf);
-    printf("Logs: /switch/dbz-budokai-3-switch/t19-*.log\n");
-    printf("Press + to close if an error is shown.\n");
-    consoleUpdate(NULL);
 
     FILE *elf = fopen(game_elf, "rb");
     if (!elf) {
