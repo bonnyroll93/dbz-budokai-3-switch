@@ -159,6 +159,7 @@ typedef struct {
     u32 last_full_frame;   /* g.frames of the last full-content hash          */
     u32 force_full;        /* guest memory known written: hash it all next use */
     u32 last_use_frame;    /* g.frames of the last lookup (stale sweep)       */
+    u32 last_change_frame; /* g.frames when a full hash last found new bytes  */
 } eng_texture;
 
 typedef struct {
@@ -991,6 +992,14 @@ static u64 eng_texture_content_hash(u32 location, u32 offset, u32 span,
  * makes still force a check (eng_textures_touch). The port sets this to 1 to
  * restore the per-use check (SD marker texhash-per-use). */
 int g_rsx_tex_hash_per_use = 0;
+/* A large texture that just changed (a movie frame, a scrolling layer) is
+ * hashed in full on every frame for ENG_TEX_HOT_FRAMES: the probe can miss a
+ * frame that only differs away from its 64 runs, which then shows up only at
+ * the 16-frame full hash. Textures that never change keep the probe. (The
+ * opening movie's stutter turned out to be the decoder: run143.) The port
+ * sets this to 0 with the SD marker tex-hot-off. */
+#define ENG_TEX_HOT_FRAMES 120u
+int g_rsx_tex_hot = 1;
 static u64 eng_texture_sample_hash(u32 location, u32 offset, u32 span)
 {
     const u8* src = span ? eng_guest_ptr(NULL, location, offset, span) : NULL;
@@ -1253,7 +1262,9 @@ static u32 eng_texture_slot(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
                           (g_rsx_tex_hash_per_use && e->span <= ENG_TEX_SMALL_BYTES))) {
             e->last_hash_frame = g.frames;
             int full = span <= ENG_TEX_SMALL_BYTES || e->force_full ||
-                       g.frames - e->last_full_frame >= ENG_TEX_FULL_HASH_FRAMES;
+                       g.frames - e->last_full_frame >= ENG_TEX_FULL_HASH_FRAMES ||
+                       (g_rsx_tex_hot && e->last_change_frame &&
+                        g.frames - e->last_change_frame < ENG_TEX_HOT_FRAMES);
             if (!full) {
                 const u64 probe = eng_texture_sample_hash(location, offset, span);
                 full = probe != e->sample_hash;
@@ -1268,6 +1279,7 @@ static u32 eng_texture_slot(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
                 e->sample_hash = eng_texture_sample_hash(location, offset, span);
             }
             if (full && readable && hash != e->content_hash) {
+                e->last_change_frame = g.frames ? g.frames : 1u;
                 u32 keep = i;
                 const u32 fresh = eng_texture_upload_room(location, offset, fmt, w, h,
                                                           levels, pitch, cube, remap, &keep);
