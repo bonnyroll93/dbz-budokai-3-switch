@@ -28,7 +28,6 @@
 
 #include <cstdint>
 #include <cstdio>
-#include <initializer_list>
 
 extern "C" void dbz3_trail_event(const char* fmt, ...);
 extern "C" { extern uint8_t* vm_base; }   /* as dbz3_wtrack.cpp */
@@ -41,16 +40,32 @@ int g_reports = 0;
  * of this allocator live in sys_memory (0x4xxxxxxx) and in RSX local memory
  * (0xC5xxxxxx), their list heads in the control blocks (0x0048xxxx), so a
  * fixed address range is wrong (run168/run170 flagged sane blocks). */
+/* Readable regions seen so far (host addresses, [lo, hi)), per thread: a
+ * region is large, so the kernel is asked only for addresses outside them.
+ * Only positive answers are kept. */
+constexpr int kRegions = 8;
+thread_local uint64_t t_lo[kRegions], t_hi[kRegions];
+thread_local int t_next = 0;
+
+bool host_readable(uint64_t at)
+{
+    for (int i = 0; i < kRegions; ++i)
+        if (at >= t_lo[i] && at < t_hi[i]) return true;
+    MemoryInfo mi;
+    u32 pi;
+    if (R_FAILED(svcQueryMemory(&mi, &pi, at))) return false;
+    if (mi.type == MemType_Unmapped || !(mi.perm & Perm_R)) return false;
+    t_lo[t_next] = mi.addr;
+    t_hi[t_next] = mi.addr + mi.size;
+    t_next = (t_next + 1) % kRegions;
+    return true;
+}
+
 bool mapped(uint32_t a)
 {
     if (a < 0x00010000u || (a & 3u)) return false;
-    for (uint32_t at : { a, a + 8u }) {
-        MemoryInfo mi;
-        u32 pi;
-        if (R_FAILED(svcQueryMemory(&mi, &pi, (u64)(uintptr_t)(vm_base + at)))) return false;
-        if (mi.type == MemType_Unmapped || !(mi.perm & Perm_R)) return false;
-    }
-    return true;
+    const uint64_t at = (uint64_t)(uintptr_t)(vm_base + a);
+    return host_readable(at) && host_readable(at + 8u);
 }
 
 /* 0: the next block is in use (links to itself) or free with list neighbours
