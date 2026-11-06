@@ -60,6 +60,7 @@ static atomic_int debug_fps_stats;
 static atomic_int debug_fps_reset;
 static atomic_int debug_vsync = 1;
 static atomic_int debug_cap = 60;   /* 60, 30 or 0 (off) */
+static atomic_int debug_extra_repeat;   /* EXTRA REPEAT row, not saved */
 static int debug_active_scale;
 static u64 debug_old_buttons;
 static int debug_suppress_until_release;
@@ -247,7 +248,8 @@ SwitchDebugSettings switch_debug_snapshot(void)
         atomic_load(&debug_gpu_aa), atomic_load(&debug_fps_stats),
         atomic_load(&debug_vsync), atomic_load(&debug_cap),
         { atomic_load(&debug_oc[0]), atomic_load(&debug_oc[1]), atomic_load(&debug_oc[2]) },
-        { atomic_load(&debug_oc_now[0]), atomic_load(&debug_oc_now[1]), atomic_load(&debug_oc_now[2]) }
+        { atomic_load(&debug_oc_now[0]), atomic_load(&debug_oc_now[1]), atomic_load(&debug_oc_now[2]) },
+        atomic_load(&debug_extra_repeat)
     };
     return s;
 }
@@ -256,6 +258,11 @@ int switch_debug_frame_cap(void)
 {
     switch_debug_init();
     return atomic_load(&debug_cap);
+}
+
+int switch_debug_extra_repeat(void)
+{
+    return atomic_load(&debug_extra_repeat);
 }
 
 int switch_debug_input(uint64_t buttons)
@@ -309,6 +316,12 @@ int switch_debug_input(uint64_t buttons)
                 switch_debug_save();
             } else if (row == DBG_ROW_FPS_RESET && (pressed & HidNpadButton_A)) {
                 atomic_store(&debug_fps_reset, 1);
+            } else if (row == DBG_ROW_EXTRA) {
+                /* OFF, ALL, then each draw task active in the scene. */
+                const uint32_t cur = (uint32_t)atomic_load(&debug_extra_repeat);
+                const uint32_t next = dbz3_bisect_next ? dbz3_bisect_next(cur, delta)
+                                                       : (cur ? 0u : 1u);
+                atomic_store(&debug_extra_repeat, (int)next);
             } else if (row >= DBG_ROW_OC_CPU && row <= DBG_ROW_OC_RAM) {
                 const int d = row - DBG_ROW_OC_CPU, n = oc_choice_count[d];
                 int i = 0;

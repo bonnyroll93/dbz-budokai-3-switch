@@ -63,6 +63,7 @@ extern "C" void dbz3_trail_tasks(const uint32_t* fns, int count);   /* dbz3_cras
 #endif
 /* Debug menu FRAME CAP (switch_input.c): 60, 30 or 0 = off. */
 extern "C" __attribute__((weak)) int switch_debug_frame_cap(void);
+extern "C" __attribute__((weak)) int switch_debug_extra_repeat(void);   /* switch_input.c */
 /* End-of-frame wait counters, filled by 0x002909C0 (dbz3_native_math.cpp). */
 extern "C" { uint64_t g_fw_waits, g_fw_wait_ticks, g_fw_fifo_ticks, g_fw_deliver_ticks, g_fw_max_ticks; }
 #ifdef PORT_DBZ3_HEAP_TRACE
@@ -881,6 +882,132 @@ constexpr uint32_t kRepeatDraw[] = { 0x001DBC58u };
 constexpr uint32_t kRdRoom = 0x60000u;
 bool g_repeat_draw_unsafe = false;
 
+/* Logic60 bisect (debug menu EXTRA REPEAT): draw tasks run once per image, so
+ * whatever they animate falls one step behind at every extra logic step
+ * (poses out of sync, FRAME CAP 30 shows it within seconds). The row repeats
+ * every draw task, or one of them, in the extra steps like kRepeatDraw, to
+ * find the task that holds animation. The row holds 0 (off), 1 (all draw
+ * tasks) or a task function; LEFT/RIGHT step through the draw tasks seen in
+ * the last kActivePasses scheduler passes, by address. */
+constexpr int kMaxCands = 256;
+constexpr uint64_t kActivePasses = 120;   /* ~2 s at 60 passes/s */
+uint32_t g_cand_fn[kMaxCands];
+uint64_t g_cand_seen[kMaxCands];
+bool g_cand_unsafe[kMaxCands];
+int g_cand_n = 0;
+uint64_t g_bisect_pass = 0;               /* scheduler passes, never reset */
+
+int cand_index(uint32_t fn)
+{
+    for (int i = 0; i < g_cand_n; ++i)
+        if (g_cand_fn[i] == fn) return i;
+    return -1;
+}
+
+void note_draw_task(uint32_t fn)
+{
+    for (uint32_t f : kRepeatDraw)
+        if (f == fn) return;
+    int i = cand_index(fn);
+    if (i < 0) {
+        if (g_cand_n == kMaxCands) return;
+        i = g_cand_n++;
+        g_cand_fn[i] = fn;
+    }
+    g_cand_seen[i] = g_bisect_pass;
+}
+
+uint32_t bisect_mode(void)
+{
+    return switch_debug_extra_repeat ? (uint32_t)switch_debug_extra_repeat() : 0u;
+}
+
+/* The candidate this extra step repeats because of the menu, or -1. */
+int bisect_pick(uint32_t fn)
+{
+    const uint32_t mode = bisect_mode();
+    if (mode == 0) return -1;
+    const int i = cand_index(fn);
+    if (i < 0 || g_cand_unsafe[i]) return -1;
+    return (mode == 1 || mode == fn) ? i : -1;
+}
+
+/* Draw tasks seen in the last kActivePasses passes, sorted by address. */
+int active_draw_tasks(uint32_t* out)
+{
+    int n = 0;
+    for (int i = 0; i < g_cand_n; ++i) {
+        if (g_bisect_pass - g_cand_seen[i] > kActivePasses) continue;
+        int j = n++;
+        while (j > 0 && out[j - 1] > g_cand_fn[i]) { out[j] = out[j - 1]; --j; }
+        out[j] = g_cand_fn[i];
+    }
+    return n;
+}
+
+/* For the menu row (switch_debug.h): the value after cur in the sequence
+ * off, all, active draw tasks; and where fn stands in that list. */
+extern "C" uint32_t dbz3_bisect_next(uint32_t cur, int delta)
+{
+    uint32_t seq[2 + kMaxCands];
+    seq[0] = 0;
+    seq[1] = 1;
+    const int n = 2 + active_draw_tasks(seq + 2);
+    int pos = cur > 1 ? 1 : (int)cur;     /* a task gone from the scene: from ALL */
+    for (int i = 0; i < n; ++i)
+        if (seq[i] == cur) pos = i;
+    return seq[((pos + delta) % n + n) % n];
+}
+
+extern "C" int dbz3_bisect_info(uint32_t fn, int* pos, int* count)
+{
+    uint32_t list[kMaxCands];
+    const int n = active_draw_tasks(list);
+    *count = n;
+    *pos = 0;
+    for (int i = 0; i < n; ++i)
+        if (list[i] == fn) *pos = i + 1;
+    const int c = cand_index(fn);
+    return c >= 0 && g_cand_unsafe[c];
+}
+
+#ifdef PORT_DBZ3_CRASH_TRAIL
+extern "C" void dbz3_trail_event(const char* fmt, ...);
+#endif
+
+void bisect_log(const char* text)
+{
+    fprintf(stderr, "[bisect] %s\n", text);
+#ifdef PORT_DBZ3_CRASH_TRAIL
+    dbz3_trail_event("%s", text);
+#endif
+}
+
+/* Once per scheduler pass: count it, log a change of the row. */
+void bisect_note_mode(void)
+{
+    ++g_bisect_pass;
+    static uint32_t last = 0;
+    const uint32_t mode = bisect_mode();
+    if (mode == last) return;
+    last = mode;
+    char text[96];
+    uint32_t list[kMaxCands];
+    const int active = active_draw_tasks(list);
+    if (mode == 0) snprintf(text, sizeof text, "extra-repeat: off");
+    else if (mode == 1) snprintf(text, sizeof text, "extra-repeat: all draw tasks (%d active)", active);
+    else snprintf(text, sizeof text, "extra-repeat: task %06X (%d active)", mode, active);
+    bisect_log(text);
+}
+
+/* A repeated task flushed or wrapped the command ring: stop repeating it. */
+void bisect_stopped(int pick)
+{
+    char text[64];
+    snprintf(text, sizeof text, "extra-repeat: task %06X stopped (ring)", g_cand_fn[pick]);
+    bisect_log(text);
+}
+
 /* run08: entry -> loc_001DE4F4 takes about 0.45 ms and writes zero GCM bytes.
  * The rest takes 15-22 ms and emits all observed GCM output. Keep the update
  * part on extra 60 Hz steps; render the common tail on regular passes only.
@@ -958,15 +1085,19 @@ int extra_logic_step(ppu_context* ctx)
         if (opd != 0 && opd != 0xFFFFFFFFu) {
             const uint32_t fn = vm_read32(opd);
             const int cls = task_class(fn);
-            int rd = cls == CLS_DRAW && repeat_draw(fn);
+            const int pick = cls == CLS_DRAW ? bisect_pick(fn) : -1;
+            int rd = cls == CLS_DRAW && (repeat_draw(fn) || pick >= 0);
             uint32_t rd_begin0 = 0, rd_end0 = 0;
             uint32_t rd_cur0 = 0, rd_put0 = 0;
             if (rd) {
                 rd_begin0 = vm_read32(kTitleGcmCtx);
                 rd_end0 = vm_read32(kTitleGcmCtx + 4u);
                 rd_cur0 = gcm_current();
+                /* The DU task skips its render part in the extra step; any
+                 * other repeated task draws in full and needs the room. */
+                const bool full = pick >= 0 || !du_update_only_enabled();
                 if (rd_begin0 > rd_cur0 || rd_end0 < rd_cur0 ||
-                    (!du_update_only_enabled() && rd_end0 - rd_cur0 < kRdRoom)) {
+                    (full && rd_end0 - rd_cur0 < kRdRoom)) {
                     g_w.rd_noroom++;
                     task = vm_read32(task + 0x28u);
                     continue;
@@ -991,19 +1122,24 @@ int extra_logic_step(ppu_context* ctx)
                 if (rd) {
                     g_w.rd_runs++;
                     const uint32_t cur1 = gcm_current();
+                    /* A bisect repeat that flushed or wrapped stops only
+                     * itself; the DU repeat keeps its old rule. */
+                    bool& unsafe = pick >= 0 ? g_cand_unsafe[pick] : g_repeat_draw_unsafe;
+                    const bool was_unsafe = unsafe;
                     if (gcm_put() != rd_put0) {
                         g_w.rd_flushed++;
-                        g_repeat_draw_unsafe = true;
+                        unsafe = true;
                     } else if (vm_read32(kTitleGcmCtx) != rd_begin0 ||
                                vm_read32(kTitleGcmCtx + 4u) != rd_end0 ||
                                cur1 < rd_cur0 || cur1 > rd_end0) {
                         g_w.rd_wrapped++;
-                        g_repeat_draw_unsafe = true;
+                        unsafe = true;
                     } else {
                         vm_write32(kTitleGcmCtx + 8u, rd_cur0);
                         g_w.rd_rolled++;
                         g_w.rd_kb += (cur1 - rd_cur0) / 1024u;
                     }
+                    if (pick >= 0 && unsafe && !was_unsafe) bisect_stopped(pick);
                 }
                 heap_check("extra task", fn, task, 2);
                 if (loader_pending() != 0) {       /* this step started a load */
@@ -1089,6 +1225,9 @@ loc_00029014:
         ctx->gpr[2] = vm_read64(ctx->gpr[1] + 0x28);
             const uint64_t t1 = metric_ticks();
             record_task(fn, task, order, lp_us(t1 - t0), gcm_written(g0, gcm_current()));
+#ifdef PORT_DBZ3_LOGIC60
+            if (task_class(fn) == CLS_DRAW) note_draw_task(fn);
+#endif
         }
 loc_00029054:
         order++;
@@ -1184,6 +1323,9 @@ loc_0002911C:
 #endif
 #ifdef PORT_DBZ3_CRASH_TRAIL
     trail_scan_tasks();
+#endif
+#ifdef PORT_DBZ3_LOGIC60
+    bisect_note_mode();
 #endif
     add(S_28FD8, lp_us(metric_ticks() - sched_t0));
 }

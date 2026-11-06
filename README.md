@@ -528,6 +528,7 @@ next start.
 | SHOW FPS | Toggles the FPS counter at the top right. |
 | SHOW FRAME MS | Toggles the frame time readout. |
 | SHOW FPS STATS / RESET FPS STATS | Average, minimum and maximum FPS; reset them. |
+| EXTRA REPEAT | Logic60 debugging, not saved. **OFF** (normal), **ALL DRAW TASKS**, or one draw task of the current scene (Left/Right, by address): those tasks also run in the extra logic steps with their GPU commands thrown away. Draw tasks otherwise run once per image, so what they animate falls behind at every extra step; with FRAME CAP 30 this shows within seconds. Choices go to the crash trail. Graphics glitches are expected while it is on. |
 | CPU CLOCK, GPU CLOCK, RAM CLOCK | Optional overclock like sys-clk, limited to the recommended official rates: CPU 1224 to 1785 MHz, GPU 460 to 921 MHz, RAM 1600 MHz. **DEFAULT** leaves the system clock alone. `NOW` shows the clock read back from the system. The choice is re-applied after docking changes and the system clocks are restored at DEFAULT and at exit. Turn sys-clk off for this game when using it. All performance numbers in this README are at DEFAULT. |
 | **Capture** | |
 | SAVE SCREENSHOT (A) | Saves a JPEG to `captures/shot_*.jpg` and closes the menu. Needs `ScreenshotCapture`. |

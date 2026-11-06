@@ -1283,7 +1283,7 @@ static void dk_draw_debug_menu(const SwitchDebugSettings* settings, u32 fps_x10,
 {
     const u32 px = s_dk.width >= 1920 ? 4u : 3u;
     const u32 x = 24u, y = 24u, line = 8u * px;
-    const u32 box_w = 280u * px, box_h = 232u * px;   /* 28 lines of 8 + padding */
+    const u32 box_w = 280u * px, box_h = 240u * px;   /* 29 lines of 8 + padding */
     DkScissor bg = { x, y, box_w, box_h };
     dkCmdBufSetScissors(s_dk.cmd, 0, &bg, 1);
     dkCmdBufClearColorFloat(s_dk.cmd, 0, DkColorMask_RGBA, 0.04f, 0.06f, 0.12f, 1.0f);
@@ -1324,11 +1324,24 @@ static void dk_draw_debug_menu(const SwitchDebugSettings* settings, u32 fps_x10,
             else snprintf(oc[d], sizeof oc[d], "%s CLOCK: DEFAULT%s", name[d], now);
         }
     }
+    char extra[96];
+    {   /* Logic60 bisect: which draw tasks also run in the extra logic steps */
+        const uint32_t mode = (uint32_t)settings->extra_repeat;
+        int pos = 0, n = 0, stopped = 0;
+        if (dbz3_bisect_info) stopped = dbz3_bisect_info(mode, &pos, &n);
+        if (mode == 0) snprintf(extra, sizeof extra, "EXTRA REPEAT: OFF  (%d DRAW TASKS ACTIVE)", n);
+        else if (mode == 1) snprintf(extra, sizeof extra, "EXTRA REPEAT: ALL DRAW TASKS");
+        else if (pos) snprintf(extra, sizeof extra, "EXTRA REPEAT: TASK %06X  %d/%d%s",
+                               (unsigned)mode, pos, n, stopped ? "  STOPPED" : "");
+        else snprintf(extra, sizeof extra, "EXTRA REPEAT: TASK %06X  NOT ACTIVE%s",
+                      (unsigned)mode, stopped ? "  STOPPED" : "");
+    }
     snprintf(draw_start, sizeof draw_start, "DRAW START: %d  LEFT RIGHT STEP  ZL ZR 128", settings->draw_start);
     snprintf(draw_step, sizeof draw_step, "DRAW STEP: %d  CHANGE 8/1", settings->draw_step);
     labels[DBG_ROW_SCALE] = scale; labels[DBG_ROW_FXAA] = gpu_aa; labels[DBG_ROW_VSYNC] = vsync;
     labels[DBG_ROW_CAP] = cap; labels[DBG_ROW_FPS] = fps; labels[DBG_ROW_FRAME_MS] = ms;
     labels[DBG_ROW_FPS_STATS] = fps_stats; labels[DBG_ROW_FPS_RESET] = "RESET FPS STATS";
+    labels[DBG_ROW_EXTRA] = extra;
     labels[DBG_ROW_OC_CPU] = oc[0]; labels[DBG_ROW_OC_GPU] = oc[1]; labels[DBG_ROW_OC_RAM] = oc[2];
     labels[DBG_ROW_SCREENSHOT] = "SAVE SCREENSHOT";
     labels[DBG_ROW_RECORD] = settings->recording ? "STOP SCREEN RECORDING" : "START SCREEN RECORDING";

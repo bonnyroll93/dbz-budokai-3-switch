@@ -22,12 +22,15 @@ typedef struct SwitchDebugSettings {
      * from the system about once a second. */
     int oc_mhz[3];      /* CPU, GPU, RAM */
     int oc_now_mhz[3];
+    /* EXTRA REPEAT row (Logic60 bisect, not saved): 0 = off, 1 = every draw
+     * task, otherwise the guest function of the one draw task repeated. */
+    int extra_repeat;
 } SwitchDebugSettings;
 
 /* Debug menu rows (switch_input.c and the menu drawing share them). */
 enum {
     DBG_ROW_SCALE, DBG_ROW_FXAA, DBG_ROW_VSYNC, DBG_ROW_CAP,
-    DBG_ROW_FPS, DBG_ROW_FRAME_MS, DBG_ROW_FPS_STATS, DBG_ROW_FPS_RESET,
+    DBG_ROW_FPS, DBG_ROW_FRAME_MS, DBG_ROW_FPS_STATS, DBG_ROW_FPS_RESET, DBG_ROW_EXTRA,
     DBG_ROW_OC_CPU, DBG_ROW_OC_GPU, DBG_ROW_OC_RAM,
     DBG_ROW_SCREENSHOT, DBG_ROW_RECORD, DBG_ROW_DRAW_START, DBG_ROW_DRAW_STEP, DBG_ROW_DRAW_CAPTURE,
     DBG_ROW_REBOOT, DBG_ROW_CLOSE,
@@ -38,6 +41,14 @@ void switch_debug_init(void);
 SwitchDebugSettings switch_debug_snapshot(void);
 /* FRAME CAP row: 60, 30 or 0 (off). */
 int switch_debug_frame_cap(void);
+/* EXTRA REPEAT row: 0 off, 1 all draw tasks, else one task function. */
+int switch_debug_extra_repeat(void);
+/* Provided by the port (dbz3_loop_prof.cpp) when it has Logic60. next: the
+ * row value after cur (off, all, then the draw tasks active in the scene, by
+ * address). info: fn's place among the active draw tasks (0 = not active)
+ * and their count; returns nonzero if its repeat was stopped (ring). */
+uint32_t dbz3_bisect_next(uint32_t cur, int delta) __attribute__((weak));
+int dbz3_bisect_info(uint32_t fn, int *pos, int *count) __attribute__((weak));
 /* Returns nonzero when the controller belongs to the debug menu. */
 int switch_debug_input(uint64_t buttons);
 int switch_debug_take_reboot(void);
