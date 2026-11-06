@@ -384,7 +384,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
     # Session log for crash reports (crash-trail-*.log; scripts/crash-report.ps1).
     option(PORT_DBZ3_CRASH_TRAIL "Write a light session log that goes with crash reports" OFF)
     if(PORT_DBZ3_CRASH_TRAIL)
-        target_sources(${PROJECT_NAME} PRIVATE dbz3_crash_trail.cpp)
+        # TLSF guard: checks the next block's header before a free merges it
+        # (crash reading 0xFF000004); ppu_liftfast.py adds the call.
+        target_sources(${PROJECT_NAME} PRIVATE dbz3_crash_trail.cpp dbz3_tlsf_guard.cpp)
         # Per file, so the lifted sources keep their flags and are not rebuilt.
         set_property(SOURCE main.cpp dbz3_loop_prof.cpp APPEND PROPERTY
             COMPILE_DEFINITIONS PORT_DBZ3_CRASH_TRAIL=1)

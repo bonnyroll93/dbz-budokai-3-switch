@@ -959,6 +959,61 @@ int active_draw_tasks(uint32_t* out)
     return n;
 }
 
+#ifdef PORT_DBZ3_CRASH_TRAIL
+extern "C" void dbz3_trail_event(const char* fmt, ...);
+/* Object-list probe (read only). Task 0x0006FDF8 draws every object of the
+ * list at 0x00492560 through func_000651C0: head at +0x24, next at obj+0x24,
+ * sentinel 0x00492610; an object is drawn when its handler OPD (obj+0x14) is
+ * set and (obj+0x20 & 0x880F) == 0. Repeating that task keeps poses in sync
+ * (run165), so one handler advances animation while it draws. Logs the
+ * handler functions and how many objects use each, drawn and skipped, when
+ * that set changes (at most twice a second). */
+void probe_object_list(void)
+{
+    constexpr uint32_t kList = 0x00492560u, kSentinel = 0x00492610u;
+    constexpr int kMax = 24;
+    uint32_t fn[kMax];
+    uint16_t on[kMax], off[kMax];
+    int n = 0, objs = 0;
+    uint32_t obj = vm_read32(kList + 0x24u);
+    for (int guard = 0; obj != kSentinel && obj != 0 && guard < 1024; ++guard, ++objs) {
+        const uint32_t opd = vm_read32(obj + 0x14u);
+        const uint32_t f = opd ? vm_read32(opd) : 0u;
+        const bool drawn = opd != 0 && (vm_read32(obj + 0x20u) & 0x880Fu) == 0;
+        int i = 0;
+        while (i < n && fn[i] != f) ++i;
+        if (i == n) {
+            if (n == kMax) { obj = vm_read32(obj + 0x24u); continue; }
+            fn[n] = f; on[n] = off[n] = 0; ++n;
+        }
+        if (drawn) ++on[i]; else ++off[i];
+        obj = vm_read32(obj + 0x24u);
+    }
+    uint64_t h = 1469598103934665603ull;
+    for (int i = 0; i < n; ++i)
+        h = (((h ^ fn[i]) * 1099511628211ull) ^ ((uint32_t)on[i] << 16 | off[i])) * 1099511628211ull;
+    static uint64_t last_sig = 0, last_tick = 0;
+    const uint64_t now = lp_ticks();
+    if (h == last_sig || lp_us(now - last_tick) < 500000u) return;
+    last_sig = h;
+    last_tick = now;
+    /* fn:drawn/skipped, split over events of the trail's line size */
+    char text[170];
+    int len = snprintf(text, sizeof text, "objs(%d):", objs);
+    for (int i = 0; i < n; ++i) {
+        char item[24];
+        const int k = snprintf(item, sizeof item, " %06X:%u/%u", fn[i], on[i], off[i]);
+        if (len + k >= (int)sizeof text) {
+            dbz3_trail_event("%s", text);
+            len = snprintf(text, sizeof text, "objs+:");
+        }
+        memcpy(text + len, item, (size_t)k + 1);
+        len += k;
+    }
+    dbz3_trail_event("%s", text);
+}
+#endif
+
 /* For the menu row (switch_debug.h): the value after cur in the sequence
  * off, all, active draw tasks; and where fn stands in that list. */
 extern "C" uint32_t dbz3_bisect_next(uint32_t cur, int delta)
@@ -1233,6 +1288,9 @@ loc_00029014:
         vm_write64(ctx->gpr[1] + 0x28, ctx->gpr[2]);
         ctx->ctr = (uint32_t)ctx->gpr[5];
         ctx->gpr[2] = vm_read32(ctx->gpr[4] + 0x4);
+#ifdef PORT_DBZ3_CRASH_TRAIL
+        if (fn == 0x0006FDF8u) probe_object_list();
+#endif
         g_dbz3_cur_task_fn = fn; g_dbz3_cur_pass = 1;
         { ps3_indirect_call(ctx); DRAIN_TRAMPOLINE(ctx); }
         g_dbz3_cur_task_fn = 0; g_dbz3_cur_pass = 0;

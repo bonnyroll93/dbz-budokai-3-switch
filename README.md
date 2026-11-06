@@ -89,7 +89,13 @@ Bugs are sorted by priority:
 
 #### P0
 
-None known.
+- **Intermittent crash in a game allocator.** The game closes with an
+  Atmosphère error (Data Abort reading guest `0xFF000004`) in
+  `func_0005494C`, a size-class allocator reached from the main loop through
+  `0x48088` -> `0x53FA0` -> `0x55010`: a free-list link holds `0xFF000000`,
+  which looks like a colour written over the heap. Seen with Goku SSJ3's
+  Dragon Fist (run167, the dragon drawn blue just before, normally gold) and
+  twice on 2 November with the same address. Not reproducible on demand.
 
 #### P1
 
