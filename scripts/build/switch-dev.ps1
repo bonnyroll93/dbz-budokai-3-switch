@@ -18,6 +18,8 @@ param(
     [switch]$LevelFunctionProfile,
     # Log input queue age, depth and dropped events every five seconds.
     [switch]$InputQueueProfile,
+    # Session log for crash reports; the ELF is kept in build\symbols.
+    [switch]$CrashTrail,
     [ValidateRange(1, 16)]
     [int]$Jobs = 4,
     [string]$DevkitPro = $(if ($env:DEVKITPRO) { $env:DEVKITPRO } else { 'C:\devkitPro' })
@@ -38,7 +40,8 @@ if (-not $NoBuild) {
     & (Join-Path $PSScriptRoot 'configure-switch.ps1') -DevkitPro $DevkitPro `
         -ProfilePpuFunctions:($ProfilePpuFunctions -or $SwitchBuild.ProfilePpuFunctions) `
         -LevelFunctionProfile:($LevelFunctionProfile -or $SwitchBuild.LevelFunctionProfile) `
-        -InputQueueProfile:($InputQueueProfile -or $SwitchBuild.InputQueueProfile)
+        -InputQueueProfile:($InputQueueProfile -or $SwitchBuild.InputQueueProfile) `
+        -CrashTrail:($CrashTrail -or $SwitchBuild.CrashTrail)
     $bash = Join-Path $DevkitPro 'msys2\usr\bin\bash.exe'
     if (-not (Test-Path -LiteralPath $bash -PathType Leaf)) { throw "MSYS2 not found: $bash" }
     $tree = "build/cmake/$($g.Tree)"
@@ -53,4 +56,8 @@ if (-not $NoBuild) {
 Write-Host "Creating development NSP ($Feature)..."
 & (Join-Path $PSScriptRoot 'package-switch.ps1') -Game $Game -OutputNsp $nsp `
     -DisplayVersion 'dev' -Feature $Feature -DevkitPro $DevkitPro
+if ($CrashTrail -or $SwitchBuild.CrashTrail) {
+    $symbols = Save-SwitchSymbols $Game $Feature $DevkitPro
+    Write-Host "ELF kept for crash reports: $symbols"
+}
 Write-Host "NSP created at $nsp. Copy and install it manually."

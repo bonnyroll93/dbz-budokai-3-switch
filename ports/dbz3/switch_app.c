@@ -45,8 +45,12 @@ void ps3_switch_app_prepare_display(void)
  * ran out and the Bink decoder thread failed to start (T22 run 3). */
 size_t __nx_heap_size = 1536u * 1024u * 1024u;  /* includes the 512 MiB deko3d image pool */
 
+/* dbz3_crash_trail.cpp, only in crash-trail builds. */
+extern void dbz3_trail_event(const char *fmt, ...) __attribute__((weak));
+
 void ps3_switch_app_stage(const char *stage)
 {
+    if (dbz3_trail_event) dbz3_trail_event("stage: %s", stage);
     if (sd_ready) {
         FILE *log = fopen(status_log, "a");
         if (log) {

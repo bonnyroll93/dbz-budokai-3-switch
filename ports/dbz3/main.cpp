@@ -65,6 +65,7 @@ extern "C" void ps3_thread_stats_register(const char* kind, const char* name);
 extern "C" uint32_t ps3_switch_current_thread_handle(void);
 extern "C" void spu_taskset_diag_snapshot(FILE* out);
 extern "C" void ppu_dump_all_thread_stacks(FILE* out);
+extern "C" void dbz3_trail_start(const char* build);   /* dbz3_crash_trail.cpp */
 static uint32_t g_main_thread_handle = 0;
 #endif
 
@@ -724,6 +725,9 @@ int main(int argc, char** argv)
     /* main.cpp is touched by switch-dev.ps1 before every build, so this is
      * the time of the build that is running. */
     fprintf(stderr, "[build] compiled %s %s\n", __DATE__, __TIME__);
+#ifdef PORT_DBZ3_CRASH_TRAIL
+    dbz3_trail_start(__DATE__ " " __TIME__);
+#endif
     /* A run stopping before a subsystem starts must not inherit its old log. */
     #ifndef PORT_DBZ3_LIGHT_BUILD
     const char* boot_logs[] = {"t21-frames.log", "t21-spu-hot.log", "t21-input.log",

@@ -151,3 +151,35 @@ function Get-SwitchMsysPath {
     if ($p.Contains("'")) { throw "Project paths containing an apostrophe are unsupported: $p" }
     $p
 }
+
+# ELF copies for crash reports: build\symbols\<game>\<build id>\. Atmosphere's
+# crash report names the module by its build id ("Module Id"), so a report can
+# be matched to the exact ELF even after later builds. The last 10 are kept.
+function Get-SwitchElfBuildId([string]$Elf, [string]$DevkitPro) {
+    $readelf = Join-Path $DevkitPro 'devkitA64\bin\aarch64-none-elf-readelf.exe'
+    if (-not (Test-Path -LiteralPath $readelf)) { throw "readelf not found: $readelf" }
+    $notes = & $readelf -n $Elf
+    $line = $notes | Where-Object { $_ -match 'Build ID:\s*([0-9a-fA-F]+)' } | Select-Object -First 1
+    if (-not $line) { throw "No build id in $Elf" }
+    [void]($line -match 'Build ID:\s*([0-9a-fA-F]+)')
+    $Matches[1].ToLowerInvariant()
+}
+
+function Get-SwitchSymbolsRoot([string]$Game) {
+    Join-Path (Get-SwitchProject) "build\symbols\$Game"
+}
+
+function Save-SwitchSymbols([string]$Game, [string]$Feature, [string]$DevkitPro) {
+    $elf = Get-SwitchElf $Game
+    $id = Get-SwitchElfBuildId $elf $DevkitPro
+    $root = Get-SwitchSymbolsRoot $Game
+    $dir = Join-Path $root $id
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    Copy-Item -LiteralPath $elf -Destination (Join-Path $dir 'dbz-budokai-3-switch.elf') -Force
+    @("build_id=$id", "feature=$Feature",
+      "built=$((Get-Item -LiteralPath $elf).LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'))") |
+        Set-Content -LiteralPath (Join-Path $dir 'build-info.txt') -Encoding utf8
+    Get-ChildItem -LiteralPath $root -Directory | Sort-Object LastWriteTime -Descending |
+        Select-Object -Skip 10 | Remove-Item -Recurse -Force
+    $dir
+}

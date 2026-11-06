@@ -16,4 +16,7 @@ $SwitchBuild = @{
     ShaderCapture           = $true
     ScreenshotCapture       = $false
     Logic60                 = $true
+    # Session log for crash reports (crash-trail-*.log) and a copy of the ELF
+    # in build\symbols for scripts\crash-report.ps1. Same cost as the light build.
+    CrashTrail              = $false
 }

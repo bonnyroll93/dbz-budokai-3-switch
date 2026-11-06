@@ -58,6 +58,9 @@ extern "C" uint64_t g_dbz3_adx_sur_calls;   /* dbz3_audio_trace.cpp */
 
 /* Scheduler task running now, for the allocator trace (dbz3_heap_trace.cpp). */
 extern "C" { uint32_t g_dbz3_cur_task_fn = 0; int g_dbz3_cur_pass = 0; }
+#ifdef PORT_DBZ3_CRASH_TRAIL
+extern "C" void dbz3_trail_tasks(const uint32_t* fns, int count);   /* dbz3_crash_trail.cpp */
+#endif
 /* Debug menu FRAME CAP (switch_input.c): 60, 30 or 0 = off. */
 extern "C" __attribute__((weak)) int switch_debug_frame_cap(void);
 /* End-of-frame wait counters, filled by 0x002909C0 (dbz3_native_math.cpp). */
@@ -635,6 +638,38 @@ uint64_t task_list_sig(void)
     return h;
 }
 
+#ifdef PORT_DBZ3_CRASH_TRAIL
+/* Crash trail: hand the sorted set of task functions to dbz3_crash_trail.cpp
+ * when it changes (it tells menu, duel, DU map and cutscenes apart). */
+void trail_scan_tasks(void)
+{
+    static uint64_t last_sig = 0;
+    uint32_t fns[64];
+    int n = 0;
+    uint32_t task = vm_read32(kTaskListHead);
+    for (int guard = 0; task != kTaskListEnd && task != 0 && guard < 4096; ++guard) {
+        const uint32_t opd = vm_read32(task + 0x1Cu);
+        if (opd != 0 && opd != 0xFFFFFFFFu && n < 64) {
+            const uint32_t fn = vm_read32(opd);
+            int i = n;
+            while (i > 0 && fns[i - 1] > fn) --i;
+            if (i == 0 || fns[i - 1] != fn) {
+                memmove(fns + i + 1, fns + i, sizeof(uint32_t) * (size_t)(n - i));
+                fns[i] = fn;
+                ++n;
+            }
+        }
+        task = vm_read32(task + 0x28u);
+    }
+    uint64_t h = 1469598103934665603ull;
+    for (int i = 0; i < n; ++i) h = (h ^ fns[i]) * 1099511628211ull;
+    if (h != last_sig) {
+        last_sig = h;
+        dbz3_trail_tasks(fns, n);
+    }
+}
+#endif
+
 void record_task(uint32_t fn, uint32_t task, uint32_t order, uint64_t us,
                  uint32_t gcm_bytes)
 {
@@ -1146,6 +1181,9 @@ loc_0002911C:
     }
 #else
     g_w.steps_hist[1]++;
+#endif
+#ifdef PORT_DBZ3_CRASH_TRAIL
+    trail_scan_tasks();
 #endif
     add(S_28FD8, lp_us(metric_ticks() - sched_t0));
 }

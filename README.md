@@ -98,6 +98,9 @@ None known.
   frames. The 60 FPS figure is measured on Goku vs Vegeta.
 - **Dragon Universe map and level screen at ~30 FPS.** Both ran at ~30 FPS or
   lower before the 60 FPS work and have not been measured again since.
+- **Poses and animations out of sync after a while.** After playing for some
+  time, characters' poses and animations sometimes go out of sync. Cause not
+  known yet; not tied to a specific scene so far.
 
 #### P2
 
@@ -362,6 +365,7 @@ that `switch-dev.ps1` just built.
 | `ShaderCapture` | Dumps shaders the build does not have to `t23-shaders/` on the SD card. |
 | `ScreenshotCapture` | Includes the debug-menu screenshot and screen-recording code. |
 | `Logic60` | Keeps the 60 Hz gameplay timing. Leave it on. |
+| `CrashTrail` | Session log for crash reports and a copy of the ELF in `build/symbols` (see [Reporting crashes](#reporting-crashes)). Also `switch-dev.ps1 -CrashTrail`. |
 
 **Default build** (use this to play and to measure FPS): `Lightweight = $true`,
 `ShaderCapture = $true` (it only writes files when a shader is missing) and
@@ -453,6 +457,42 @@ the translated PS3 code when its file exists)
 To collect logs after a test, start **DBI > Run MTP responder** and run
 `scripts/pull-switch-logs.ps1 -Game dbz3`. Logs are copied to
 `build/logs/dbz3/dev/runNN`.
+
+### Reporting crashes
+
+For crashes that are hard to reproduce, play with a crash-trail build. It is
+the light build plus a small session log, so it plays the same.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build\switch-dev.ps1 `
+  -Game dbz3 -Feature crashlog -CrashTrail
+```
+
+The build keeps a copy of its ELF in `build/symbols/dbz3/<build id>/` (the
+last 10 builds). On the console every session writes
+`crash-trail-<unix time>.log` to `sdmc:/switch/dbz-budokai-3-switch/` (the
+last 10 are kept), from a low-priority thread, at most once a second:
+
+- boot stages and an exit through the game's own `exit()` (`exit (normal)`;
+  closing from the HOME menu ends the process without it, so a crash is told
+  apart by the Atmosphère report, not by this line),
+- the scheduler's task functions whenever they change (they tell menus, duels,
+  Dragon Universe and cutscenes apart),
+- every 5 s: images shown, FPS, current task, main thread `lr`, host heap,
+- if no image is shown for 10 s: where every guest thread is parked.
+
+When the game closes with an error, Atmosphère writes a crash report. Note what
+you were doing, then with **DBI > Run MTP responder** running:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\crash-report.ps1
+```
+
+It pulls the logs into a new `build/logs/dbz3/dev/runNN` and, for every crash
+report not summarised before, writes `crash-summary.txt` there: error type and
+address, the crashed thread's functions and source lines (from the matching
+ELF), and the end of that session's trail. Use `-RunDir <folder>` for logs
+already pulled.
 
 ## Debug menu
 

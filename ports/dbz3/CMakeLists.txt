@@ -381,6 +381,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
     if(PORT_DBZ3_SCREENSHOT_CAPTURE)
         target_sources(${PROJECT_NAME} PRIVATE dbz3_capture.c)
     endif()
+    # Session log for crash reports (crash-trail-*.log; scripts/crash-report.ps1).
+    option(PORT_DBZ3_CRASH_TRAIL "Write a light session log that goes with crash reports" OFF)
+    if(PORT_DBZ3_CRASH_TRAIL)
+        target_sources(${PROJECT_NAME} PRIVATE dbz3_crash_trail.cpp)
+        # Per file, so the lifted sources keep their flags and are not rebuilt.
+        set_property(SOURCE main.cpp dbz3_loop_prof.cpp APPEND PROPERTY
+            COMPILE_DEFINITIONS PORT_DBZ3_CRASH_TRAIL=1)
+    endif()
     if(PORT_DBZ3_LIGHT_BUILD)
         target_compile_definitions(${PROJECT_NAME} PRIVATE PORT_DBZ3_LIGHT_BUILD=1)
     endif()
