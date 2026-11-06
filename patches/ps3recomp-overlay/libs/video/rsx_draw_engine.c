@@ -3306,10 +3306,9 @@ static void draw_capture_note(u32 target, u32 pipeline, u32 tex_mask,
     /* Preserve the exact guest programs and fragment constants for shader
      * variants seen in this frame. This runs only while an explicit draw
      * capture is active, and makes the capture self-contained for analysis. */
-    if (s_cur_fp && s_cur_fp->bytes && s_cur_fp->size && s_cur_fp->size <= 16384u &&
-        g.fp_constants.count == 14u) {
+    if (s_cur_fp && s_cur_fp->bytes && s_cur_fp->size && s_cur_fp->size <= 16384u) {
         fprintf(f, " fp_size=%u fp_const_count=%u", s_cur_fp->size, g.fp_constants.count);
-        const u32 nconst = g.fp_constants.count < 16u ? g.fp_constants.count : 16u;
+        const u32 nconst = g.fp_constants.count < 32u ? g.fp_constants.count : 32u;
         for (u32 c = 0; c < nconst; c++) {
             float v[4];
             memcpy(v, g.fp_constants.values[c], sizeof v);

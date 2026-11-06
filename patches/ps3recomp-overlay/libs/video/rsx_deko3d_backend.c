@@ -543,6 +543,130 @@ static void gt_init(void)
     s_gt.rep = (volatile u64*)dkMemBlockGetCpuAddr(s_gt.mem);
 }
 
+/* meas2 (diag.on only): GPU time per render pass. A timestamp is written
+ * whenever the colour target changes, before the final copy to the swapchain
+ * (FXAA or blit), before the overlays, and at the end of every command list.
+ * Each mark opens a segment that the next mark closes; a list's end opens no
+ * segment, so gaps between lists are not counted. Segments are summed by
+ * target and written every 5 s to t31-gpu-passes.log, most expensive first.
+ * GPU ticks run at 614.4 MHz (t31-gpu-time.log measures ~614k ticks/ms). */
+#define GP_SLOTS 8192u
+#define GP_TAB 48u
+#define GP_KEY_FXAA    0xFFFF0001u
+#define GP_KEY_BLIT    0xFFFF0002u
+#define GP_KEY_OVERLAY 0xFFFF0003u
+enum { GP_SEG = 0, GP_END = 1 };
+static struct {
+    DkMemBlock mem;
+    volatile u64* rep;                /* mark m: timestamp at [2m+1] */
+    FILE* f;
+    struct { u32 key, kind, w, h, fmt, draws; } q[GP_SLOTS];
+    u32 qh, qt;
+    u32 draws, last_key;              /* draws since the last mark */
+    struct { u32 key, w, h, fmt; u64 ticks, segs, draws; } tab[GP_TAB];
+    u32 ntab;
+    u64 win_us, frames;
+} s_gp;
+
+static void gp_mark(u32 kind, u32 key)
+{
+    if (!s_gp.rep || s_gp.qt - s_gp.qh >= GP_SLOTS - 1u) return;
+    if (kind == GP_SEG && key == s_gp.last_key) return;    /* same pass goes on */
+    const u32 m = s_gp.qt % GP_SLOTS;
+    u32 w = 0, h = 0, fmt = 0;
+    if (key && key <= DK_MAX_SURFACES && s_dk.surfaces[key].used) {
+        w = s_dk.surfaces[key].w; h = s_dk.surfaces[key].h; fmt = (u32)s_dk.surfaces[key].fmt;
+    }
+    s_gp.rep[2u * m + 1u] = 0;
+    dkCmdBufReportCounter(s_dk.cmd, DkCounter_Timestamp, dkMemBlockGetGpuAddr(s_gp.mem) + 16u * m);
+    s_gp.q[m].key = key; s_gp.q[m].kind = kind;
+    s_gp.q[m].w = w; s_gp.q[m].h = h; s_gp.q[m].fmt = fmt;
+    s_gp.q[m].draws = s_gp.draws;      /* the draws of the segment this mark closes */
+    s_gp.draws = 0;
+    s_gp.last_key = kind == GP_END ? 0xFFFFFFFFu : key;
+    s_gp.qt++;
+}
+
+/* The pass the next draws go to: the first bound colour target. */
+static void gp_mark_bound(void)
+{
+    if (!s_gp.rep) return;
+    gp_mark(GP_SEG, s_dk.bound_count ? s_dk.bound_color[0] : 0u);
+}
+
+static void gp_add(u32 key, u32 w, u32 h, u32 fmt, u64 ticks, u32 draws)
+{
+    u32 i = 0;
+    while (i < s_gp.ntab && !(s_gp.tab[i].key == key && s_gp.tab[i].w == w && s_gp.tab[i].h == h))
+        i++;
+    if (i == s_gp.ntab) {
+        if (s_gp.ntab == GP_TAB) i = GP_TAB - 1u;          /* overflow: last row */
+        else { s_gp.ntab++; memset(&s_gp.tab[i], 0, sizeof s_gp.tab[i]); }
+        s_gp.tab[i].key = key; s_gp.tab[i].w = w; s_gp.tab[i].h = h; s_gp.tab[i].fmt = fmt;
+    }
+    s_gp.tab[i].ticks += ticks;
+    s_gp.tab[i].segs++;
+    s_gp.tab[i].draws += draws;
+}
+
+static void gp_present(void)
+{
+    if (!s_gp.rep) return;
+    while (s_gp.qt - s_gp.qh >= 2u) {
+        const u32 m = s_gp.qh % GP_SLOTS, n = (s_gp.qh + 1u) % GP_SLOTS;
+        const u64 t0 = s_gp.rep[2u * m + 1u], t1 = s_gp.rep[2u * n + 1u];
+        if (!t0 || !t1) break;                       /* not run yet */
+        if (s_gp.q[m].kind == GP_SEG && t1 > t0)
+            gp_add(s_gp.q[m].key, s_gp.q[m].w, s_gp.q[m].h, s_gp.q[m].fmt, t1 - t0, s_gp.q[n].draws);
+        s_gp.qh++;
+    }
+    s_gp.frames++;
+    const u64 now = dk_now_us();
+    if (!s_gp.win_us) { s_gp.win_us = now; return; }
+    if (now - s_gp.win_us < 5000000u || !s_gp.frames || !s_gp.ntab) return;
+    /* most expensive first */
+    for (u32 a = 0; a + 1u < s_gp.ntab; a++)
+        for (u32 b = a + 1u; b < s_gp.ntab; b++)
+            if (s_gp.tab[b].ticks > s_gp.tab[a].ticks) {
+                const __typeof__(s_gp.tab[0]) t = s_gp.tab[a];
+                s_gp.tab[a] = s_gp.tab[b]; s_gp.tab[b] = t;
+            }
+    const double fr = (double)s_gp.frames, tpms = 614400.0;
+    double total = 0.0;
+    for (u32 i = 0; i < s_gp.ntab; i++) total += (double)s_gp.tab[i].ticks / tpms / fr;
+    fprintf(s_gp.f, "window_ms=%llu frames=%llu gpu_ms/f=%.2f targets=%u\n",
+            (unsigned long long)((now - s_gp.win_us) / 1000u), (unsigned long long)s_gp.frames,
+            total, s_gp.ntab);
+    for (u32 i = 0; i < s_gp.ntab && i < 16u; i++) {
+        char name[32];
+        const u32 k = s_gp.tab[i].key;
+        if (k == GP_KEY_FXAA) snprintf(name, sizeof name, "present-fxaa");
+        else if (k == GP_KEY_BLIT) snprintf(name, sizeof name, "present-blit");
+        else if (k == GP_KEY_OVERLAY) snprintf(name, sizeof name, "overlay");
+        else snprintf(name, sizeof name, "surface#%u", k);
+        fprintf(s_gp.f, "  %-14s %4ux%-4u fmt=%-2u ms/f=%6.2f segs/f=%5.1f draws/f=%6.1f\n",
+                name, s_gp.tab[i].w, s_gp.tab[i].h, s_gp.tab[i].fmt,
+                (double)s_gp.tab[i].ticks / tpms / fr, (double)s_gp.tab[i].segs / fr,
+                (double)s_gp.tab[i].draws / fr);
+    }
+    fflush(s_gp.f);
+    s_gp.win_us = now;
+    s_gp.frames = 0;
+    s_gp.ntab = 0;
+}
+
+static void gp_init(void)
+{
+    if (!ps3_diag_enabled) return;
+    s_gp.mem = dk_block(GP_SLOTS * 16u, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuUncached);
+    if (!s_gp.mem) return;
+    s_gp.f = fopen("sdmc:/switch/dbz-budokai-3-switch/t31-gpu-passes.log", "w");
+    if (!s_gp.f) return;
+    fprintf(s_gp.f, "GPU time per render target per presented frame (ms at 614.4 MHz ticks)\n");
+    s_gp.last_key = 0xFFFFFFFFu;
+    s_gp.rep = (volatile u64*)dkMemBlockGetCpuAddr(s_gp.mem);
+}
+
 static void dk_cmd_reset(void)
 {
     dkCmdBufClear(s_dk.cmd);
@@ -562,6 +686,7 @@ static void dk_cmd_reset(void)
                         DkInvalidateFlags_Image | DkInvalidateFlags_L2Cache);
     }
     gt_list_begin();
+    gp_mark_bound();
 }
 
 /* Called by deko3d when the command memory runs out mid-recording. */
@@ -675,6 +800,7 @@ static void dk_wait_inflight_at(int line)
 static void dk_submit_wait_at(int line)
 {
     const u64 t0 = dk_now_us();
+    gp_mark(GP_END, 0);
     gt_list_end();
     DkCmdList list = dkCmdBufFinishList(s_dk.cmd);
     dkQueueSubmitCommands(s_dk.queue, list);
@@ -710,6 +836,7 @@ static void dk_submit_async(void)
         return;
     }
     const u64 t0 = dk_now_us();
+    gp_mark(GP_END, 0);
     gt_list_end();
     DkCmdList list = dkCmdBufFinishList(s_dk.cmd);
     dkQueueSubmitCommands(s_dk.queue, list);
@@ -1026,6 +1153,7 @@ static void be_bind_targets(void* user, const u32* surfaces, u32 count, u32 dept
     s_dk.bound_count = count;
     s_dk.bound_depth = depth;
     dk_rebind_targets();
+    gp_mark_bound();
 }
 
 /* Remembered, and applied by the draw: a clear in between sets a scissor of
@@ -1517,6 +1645,7 @@ static void be_present(void* user, u32 surface)
     DkImageView const* dsts[1] = { &dst };
     if (have_src) {
         dk_target* t = &s_dk.surfaces[surface];
+        gp_mark(GP_SEG, settings.gpu_aa ? GP_KEY_FXAA : GP_KEY_BLIT);
         if (!settings.gpu_aa || !dk_fxaa_present(surface, &dst)) {
             DkImageView src;
             dkImageViewDefaults(&src, &t->image);
@@ -1563,6 +1692,7 @@ static void be_present(void* user, u32 surface)
           if (fps_x10 > stat_max_x10) stat_max_x10 = fps_x10;
           stat_windows++;
       }
+      gp_mark(GP_SEG, GP_KEY_OVERLAY);
       if (settings.show_fps) dk_draw_fps_overlay();
       if (settings.show_frame_ms) {
           char ms[32];
@@ -1593,6 +1723,7 @@ static void be_present(void* user, u32 surface)
     s_dk.bound_dirty = 1;
     dk_submit_async();
     gt_present();
+    gp_present();
     /* Frame s_present_serial was just submitted and the set it waited for held
      * frame serial - (sets - 1); frames up to serial - sets are surely done. */
     { const u32 lag = s_dk.n_sets > 1 ? (u32)s_dk.n_sets : 2u;
@@ -2115,6 +2246,7 @@ static int dk_fxaa_present(u32 surface, DkImageView const* dst)
     /* The guest draw cache must not assume its state survived this pass. */
     memset(&s_dk.recorded, 0, sizeof s_dk.recorded);
     s_dk.st.gpu_draws++;
+    s_gp.draws++;
     s_dk.st.blits++;
     dk_note_op();
     return 1;
@@ -2598,6 +2730,7 @@ static void be_draw(void* user, rsx_topology topology, const void* vertices,
         dkCmdBufDraw(cb, prim, vertex_count, 1, 0, 0);
     }
     s_dk.st.gpu_draws++;
+    s_gp.draws++;
     dk_note_op();
 }
 
@@ -2721,6 +2854,7 @@ static int dk_init_device(u32 width, u32 height)
     }
     if (s_dk.n_sets < 2) s_dk.set_ring[1] = NULL;   /* synchronous presents */
     gt_init();
+    gp_init();
     { FILE* ps = fopen("sdmc:/switch/dbz-budokai-3-switch/present-sync", "r");
       s_dk.async_present = !ps;
       if (ps) fclose(ps); }
