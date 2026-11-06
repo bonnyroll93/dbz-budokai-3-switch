@@ -378,6 +378,20 @@ constexpr int kMaxSteps = 4;   /* G1: frames up to ~67 ms still keep real time *
 constexpr uint64_t kCatchUpUs = 30u * kStepUs;
 uint64_t g_step_last = 0;
 uint64_t g_step_acc = 0;
+/* Logic60 counters since boot, never reset (crash trail heartbeat):
+ * passes, logic steps run (regular + extra), passes whose extra steps were
+ * held back by a pending load, steps cut short by a load, time owed that
+ * was thrown away by the catch-up cap (us). */
+uint64_t g_l60_passes = 0, g_l60_steps = 0, g_l60_gated = 0, g_l60_aborted = 0;
+uint64_t g_l60_dropped_us = 0;
+
+void cap_step_acc(void)
+{
+    if (g_step_acc > kCatchUpUs) {
+        g_l60_dropped_us += g_step_acc - kCatchUpUs;
+        g_step_acc = kCatchUpUs;
+    }
+}
 
 /*
  * Frame pacing for logic60 (run29: frames of 25-45 ms gave 1, 2 or 3 logic
@@ -520,7 +534,7 @@ int logic_steps_due(void)
     if (steps > kMaxSteps) steps = kMaxSteps;
     const uint64_t used = (uint64_t)steps * kStepUs;
     g_step_acc = g_step_acc > used ? g_step_acc - used : 0;
-    if (g_step_acc > kCatchUpUs) g_step_acc = kCatchUpUs;   /* no spiral after a long stall */
+    cap_step_acc();   /* no spiral after a long stall */
     return steps;
 }
 
@@ -528,7 +542,7 @@ int logic_steps_due(void)
 void logic_steps_defer(int steps)
 {
     g_step_acc += (uint64_t)steps * kStepUs;
-    if (g_step_acc > kCatchUpUs) g_step_acc = kCatchUpUs;
+    cap_step_acc();
 }
 
 /* Gate for the extra logic steps (run25 crash: end of a match, the async
@@ -1307,16 +1321,19 @@ loc_0002911C:
             if (task_list_sig() != list_sig0) g_w.gated_list++;
             if (load0 != 0 || loader_pending() != 0) {
                 g_w.gated_load++;
+                g_l60_gated++;
             } else {
                 while (ran < steps) {
                     const int ok = extra_logic_step(ctx);
                     ++ran;
-                    if (!ok) break;
+                    if (!ok) { g_l60_aborted++; break; }
                 }
             }
             if (ran < steps) logic_steps_defer(steps - ran);
         }
         g_w.steps_hist[ran]++;
+        g_l60_passes++;
+        g_l60_steps += (uint64_t)ran;
     }
 #else
     g_w.steps_hist[1]++;
@@ -1329,3 +1346,12 @@ loc_0002911C:
 #endif
     add(S_28FD8, lp_us(metric_ticks() - sched_t0));
 }
+
+#ifdef PORT_DBZ3_LOGIC60
+/* Crash trail heartbeat: passes, steps, gated, aborted, dropped_us. */
+extern "C" void dbz3_logic60_counters(uint64_t out[5])
+{
+    out[0] = g_l60_passes; out[1] = g_l60_steps; out[2] = g_l60_gated;
+    out[3] = g_l60_aborted; out[4] = g_l60_dropped_us;
+}
+#endif

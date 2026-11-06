@@ -33,6 +33,8 @@ extern "C" uint32_t ppu_main_lr(void);
 extern "C" void ppu_dump_all_thread_stacks(FILE* out);
 extern "C" void spu_taskset_diag_snapshot(FILE* out);
 extern "C" uint32_t g_dbz3_cur_task_fn;
+/* dbz3_loop_prof.cpp with Logic60: passes, steps, gated, aborted, dropped_us. */
+extern "C" void dbz3_logic60_counters(uint64_t out[5]) __attribute__((weak));
 
 namespace {
 
@@ -161,11 +163,27 @@ void writer(void*)
 
         if (++since_heartbeat >= kHeartbeatS) {
             struct mallinfo mi = mallinfo();
-            char line[192];
-            snprintf(line, sizeof line,
+            char line[320];
+            int n = snprintf(line, sizeof line,
                      "hb flips=%u fps=%.1f task=%06X lr=%08X heap_used_mb=%.1f",
                      flips, (double)(flips - window_flips) / since_heartbeat,
                      g_dbz3_cur_task_fn, ppu_main_lr(), mi.uordblks / 1048576.0);
+            /* Logic60 over the window: logic steps per second (60 = real
+             * time), passes per second, passes whose extra steps a load held
+             * back, extra steps cut short by a load, owed time thrown away. */
+            static uint64_t l60_prev[5];
+            if (dbz3_logic60_counters && n > 0 && n < (int)sizeof line) {
+                uint64_t c[5];
+                dbz3_logic60_counters(c);
+                snprintf(line + n, sizeof line - (size_t)n,
+                         " l60 steps_s=%.1f passes_s=%.1f gated=%llu aborted=%llu dropped_ms=%llu",
+                         (double)(c[1] - l60_prev[1]) / since_heartbeat,
+                         (double)(c[0] - l60_prev[0]) / since_heartbeat,
+                         (unsigned long long)(c[2] - l60_prev[2]),
+                         (unsigned long long)(c[3] - l60_prev[3]),
+                         (unsigned long long)((c[4] - l60_prev[4]) / 1000u));
+                memcpy(l60_prev, c, sizeof c);
+            }
             write_line(line);
             window_flips = flips;
             since_heartbeat = 0;
