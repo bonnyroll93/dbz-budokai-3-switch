@@ -150,6 +150,16 @@ None known.
 
 ## Changelog
 
+### Unreleased
+
+- **Fixed: white screen during the ending movie** of Dragon Universe. Its
+  vertex shader (`vs_4be0700ed8cbefd6`) was missing, so the movie was not
+  drawn; it and seven other shaders seen at the end of DU were captured and
+  added.
+- **Added: crash-trail build** (`switch-dev.ps1 -CrashTrail`) and
+  `scripts/crash-report.ps1` for crashes that are hard to reproduce (see
+  [Reporting crashes](#reporting-crashes)).
+
 ### 0.1.0 (6 November 2026)
 
 First public release, experimental. Source only: build the NSP from your own
