@@ -23,6 +23,7 @@
 #define PPU_FAST_VM 1
 #include "dbz3_lifted_prelude.inc"
 #include "dbz3_store_hook.h"
+#include "dbz3_native_stamp.h"
 
 #include <switch.h>
 #include <cmath>
@@ -526,6 +527,7 @@ void dispatch(ppu_context* c, int i)
 {
     if (__builtin_expect(s_mode == 0, 0)) decide();
     Entry& e = s_fn[i];
+    DBZ3_NATIVE_STAMP(c, e.hash_ea[0]);
     if (s_mode < 0 || !s_ok[i]) { e.lifted(c); return; }
     if (s_mode == 2) {
         e.st.calls++;

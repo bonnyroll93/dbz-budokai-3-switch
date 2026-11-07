@@ -44,6 +44,7 @@
 #define PPU_FAST_VM 1
 #include "dbz3_lifted_prelude.inc"
 #include "dbz3_store_hook.h"
+#include "dbz3_native_stamp.h"
 
 #include <arm_neon.h>
 #include <switch.h>
@@ -1874,8 +1875,24 @@ void verify_call(ppu_context* c, Entry& e)
     keep_lifted();
 }
 
+#if defined(DBZ3_NATIVE_STAMPS)
+/* Profile builds: the guest address for the stamp, from the entry name
+ * ("color 0x0002C7D8"); entries without a hash have no hash_ea[0]. */
+uint32_t stamp_ea(const Entry& e)
+{
+    static uint32_t s_ea[sizeof s_fn / sizeof s_fn[0]];
+    const unsigned i = (unsigned)(&e - s_fn);
+    if (!s_ea[i]) {
+        const char* p = strstr(e.name, "0x");
+        s_ea[i] = p ? (uint32_t)strtoul(p, nullptr, 16) : 0u;
+    }
+    return s_ea[i];
+}
+#endif
+
 void dispatch(ppu_context* c, Entry& e)
 {
+    DBZ3_NATIVE_STAMP(c, stamp_ea(e));
     if (__builtin_expect(e.mode == 1, 1)) {
         if (!e.native(c)) e.lifted(c);
         return;
@@ -1938,6 +1955,7 @@ static int s_fw_mode;   // 0 undecided, 1 delivering loop, -1 lifted
 
 void func_002909C0(ppu_context* ctx)
 {
+    DBZ3_NATIVE_STAMP(ctx, 0x002909C0u);
     if (g_t23_postfx_nowait) return;
     if (__builtin_expect(!s_fw_mode, 0)) {
         s_fw_mode = sd_flag("usercmd-pump-off") ? -1 : 1;

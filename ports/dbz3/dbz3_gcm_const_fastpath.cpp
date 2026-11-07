@@ -42,6 +42,7 @@
 
 #define PPU_FAST_VM 1
 #include "ppu_recomp.h"
+#include "dbz3_native_stamp.h"
 
 #include <atomic>
 #include <cstdio>
@@ -374,6 +375,7 @@ extern "C" void wrap_func_001FCAC4(ppu_context* ctx)
     __asm__("__wrap__Z13func_001FCAC4P11ppu_context");
 extern "C" void wrap_func_001FCAC4(ppu_context* ctx)
 {
+    DBZ3_NATIVE_STAMP(ctx, 0x001FCAC4u);
     int state = g_state.load(std::memory_order_acquire);
     if (__builtin_expect(state == 0, 0)) {
         enable_once();

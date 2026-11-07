@@ -32,6 +32,7 @@ extern uint32_t g_dbz3_cur_task_fn __attribute__((weak));
  * SITE_FN, the sample also counts ctx->lr, the return point of the last call
  * it made. Time in native code and imports it calls lands on that call site. */
 #define SITE_FN 0x000328A8u
+#define SITE_FN2 0x0001AA00u   /* its caller, the mesh draw prepare */
 
 #define HOT_BUCKETS 16384u
 typedef struct { uint32_t addr, task, samples; } HotBucket;
@@ -98,7 +99,7 @@ static void* ppu_hot_sampler(void* unused)
         if (!hot_add(by_fn, a, 0)) lost++;
         hot_add(by_pair, a, t);
         hot_add(by_task, 0, t);
-        if (s_fn_mode && a == SITE_FN) hot_add(by_site, ppu_main_lr(), a);
+        if (s_fn_mode && (a == SITE_FN || a == SITE_FN2)) hot_add(by_site, ppu_main_lr(), a);
         if (s_fn_mode) {
             /* The main thread keeps running while this copies the chain; a
              * sample caught mid call or return is off by one level at most. */

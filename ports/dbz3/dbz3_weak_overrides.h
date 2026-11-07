@@ -113,8 +113,6 @@ void func_002909C0_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_00290
 #endif
 /* Native-A step 2c: mesh draw bodies (dbz3_native_mesh.cpp). */
 #ifdef DBZ3_NATIVE_MESH
-void func_0001AA00(ppu_context* ctx) __attribute__((weak));   /* defined in TU 000 */
 void func_000328A8(ppu_context* ctx) __attribute__((weak));   /* defined in TU 000 */
-void func_0001AA00_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_0001AA00P11ppu_context")));
 void func_000328A8_lifted(ppu_context* ctx) __attribute__((alias("_Z13func_000328A8P11ppu_context")));
 #endif

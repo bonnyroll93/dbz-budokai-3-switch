@@ -394,6 +394,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
     if(PORT_DBZ3_LIGHT_BUILD)
         target_compile_definitions(${PROJECT_NAME} PRIVATE PORT_DBZ3_LIGHT_BUILD=1)
     endif()
+    if(PORT_SWITCH_PPU_FUNC_PROFILE)
+        # Native replacements stamp themselves in the T23 profile (dbz3_native_stamp.h).
+        set_property(SOURCE dbz3_native_math.cpp dbz3_native_draw.cpp dbz3_native_shader.cpp
+            dbz3_native_material.cpp dbz3_gcm_const_fastpath.cpp dbz3_ppu_native.cpp
+            dbz3_native_mesh.cpp
+            APPEND PROPERTY COMPILE_DEFINITIONS DBZ3_NATIVE_STAMPS=1)
+    endif()
     if(PORT_DBZ3_LOOP_METRICS)
         set_property(SOURCE dbz3_loop_prof.cpp APPEND PROPERTY COMPILE_DEFINITIONS PORT_DBZ3_LOOP_METRICS=1)
     endif()
@@ -479,27 +486,18 @@ if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
                 set(_dbz3_native_draw ON)
                 message(STATUS "DBZ3 native draw-state functions: ON")
             endif()
-            # Native-A step 2c: mesh draw bodies (harness and undo-log self-test).
-            option(PORT_DBZ3_NATIVE_MESH "Mesh draw bodies harness (guest 0x0001AA00, 0x000328A8); no gain (run83-86), off" OFF)
+            # Native-A step 2c: mesh draw body 0x000328A8 in native code (with the
+            # undo-log verify harness in PORT_DBZ3_WTRACK builds).
+            option(PORT_DBZ3_NATIVE_MESH "Native mesh draw body (guest 0x000328A8); run186/187 draw task -0.6 ms" ON)
             if(PORT_DBZ3_NATIVE_MESH AND PORT_DBZ3_NATIVE_MATERIAL)
-                set(_mesh_fast "${CMAKE_CURRENT_BINARY_DIR}/native-inc/dbz3_mesh_fast.inc")
-                add_custom_command(OUTPUT "${_mesh_fast}"
-                    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/native-inc"
-                    COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/../../.venv/Scripts/python.exe" -I
-                            "${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/ppu_mesh_fast.py"
-                            "${RECOMP_DIR}/ppu_recomp_000.cpp" "${_mesh_fast}" "0001AA00,000328A8"
-                    DEPENDS "${RECOMP_DIR}/ppu_recomp_000.cpp"
-                            "${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/ppu_mesh_fast.py"
-                            "${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/ppu_regcache.py"
-                            "${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/ppu_vecneon.py" VERBATIM)
-                target_sources(${PROJECT_NAME} PRIVATE dbz3_native_mesh.cpp "${_mesh_fast}")
+                target_sources(${PROJECT_NAME} PRIVATE dbz3_native_mesh.cpp)
                 set_property(SOURCE dbz3_native_mesh.cpp APPEND PROPERTY COMPILE_OPTIONS "-ffp-contract=off;-w")
                 set_property(SOURCE dbz3_native_mesh.cpp APPEND PROPERTY
                     INCLUDE_DIRECTORIES "${CMAKE_CURRENT_BINARY_DIR}/native-inc")
                 set_property(SOURCE dbz3_native_mesh.cpp APPEND PROPERTY
-                    OBJECT_DEPENDS "${_prelude};${_mesh_fast}")
+                    OBJECT_DEPENDS "${_prelude}")
                 set(_dbz3_native_mesh ON)
-                message(STATUS "DBZ3 mesh bodies harness: ON")
+                message(STATUS "DBZ3 native mesh body: ON")
             endif()
             # Hot math: libm sinf/cosf kernel and the quaternion matrix multiply.
             option(PORT_DBZ3_NATIVE_MATH "Native sin/cos kernel and matrix multiply (guest 0x002A733C, 0x000252B0)" ON)

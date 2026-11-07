@@ -16,6 +16,7 @@
 #define PPU_FAST_VM 1
 #include "ppu_recomp.h"
 #include "dbz3_store_hook.h"
+#include "dbz3_native_stamp.h"
 
 #include <arm_neon.h>
 #include <cstdio>
@@ -102,6 +103,7 @@ bool check_guest(uint32_t ea, uint64_t expected_hash, const char* what)
  * In fights this was ~11% of the main PPU thread (one call per bone). */
 void func_00025130(ppu_context* ctx)
 {
+    DBZ3_NATIVE_STAMP(ctx, 0x00025130u);
     static int checked = 0;
     if (__builtin_expect(!checked, 0)) {
         checked = check_guest(0x00025130u, 0xA5E0778B0892EBB2ull,
@@ -193,6 +195,7 @@ inline bool mm_unreserved(uint32_t ea, uint64_t n)
 
 void func_00292628(ppu_context* ctx)
 {
+    DBZ3_NATIVE_STAMP(ctx, 0x00292628u);
     static int checked = 0;
     if (__builtin_expect(!checked, 0)) {
         checked = check_guest(0x00292628u, 0xA04FEE84B41AC86Bull,

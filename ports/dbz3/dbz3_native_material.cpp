@@ -26,6 +26,7 @@
 #define PPU_FAST_VM 1
 #include "dbz3_lifted_prelude.inc"
 #include "dbz3_store_hook.h"
+#include "dbz3_native_stamp.h"
 
 #include <switch.h>
 #include <cstdarg>
@@ -500,6 +501,7 @@ void verify_call(ppu_context* c, uint32_t m, uint32_t R)
 
 void func_0002C088(ppu_context* ctx)
 {
+    DBZ3_NATIVE_STAMP(ctx, 0x0002C088u);
     if (__builtin_expect(s_mode == 0, 0)) {
         const bool code_ok = guest_hash(0x0002C088u) == 0x8A5D788153FCB62Full &&
                              guest_hash(0x0004F14Cu) == 0x4B05FB5743F929B4ull &&

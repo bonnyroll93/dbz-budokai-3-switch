@@ -21,6 +21,7 @@
 #define PPU_FAST_VM 1
 #include "dbz3_lifted_prelude.inc"
 #include "dbz3_store_hook.h"
+#include "dbz3_native_stamp.h"
 
 #include <switch.h>
 #include <cstdarg>
@@ -332,6 +333,7 @@ void decide()
 
 void dispatch(ppu_context* c, int k, NativeFn native, LiftedFn lifted)
 {
+    DBZ3_NATIVE_STAMP(c, k ? 0x00053880u : 0x00053B30u);
     if (__builtin_expect(s_mode == 0, 0)) decide();
     if (s_mode < 0) { lifted(c); return; }
     if (s_mode == 2) {

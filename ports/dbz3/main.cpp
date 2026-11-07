@@ -634,11 +634,38 @@ static bool alloc_guest_vm(void)
 /* ---------------------------------------------------------------------------
  * Main
  * -----------------------------------------------------------------------*/
+#if defined(PORT_SWITCH_PPU_FUNC_PROFILE)
+/* T23 profile: guest callbacks (the GCM vblank, flip and user-command handlers,
+ * delivered by ppu_gcm_pump at HLE boundaries) run on a scratch context, so
+ * their lifted functions do not stamp themselves and their time was charged to
+ * whichever import stub was running. On the main thread they now show as
+ * fn=0xC0000000|opd. */
+extern "C" PPU_THREAD_LOCAL ppu_context* g_active_ctx;
+extern "C" ppu_context* volatile g_ppu_main_ctx;
+extern "C" volatile uint32_t g_ppu_fn_stamp;
+extern "C" volatile uint32_t g_ppu_fn_stack[256];
+extern "C" volatile uint32_t g_ppu_fn_depth;
+#endif
+
 static void harness_guest_caller(uint32_t opd, uint64_t a0, uint64_t a1,
                                  uint64_t a2, uint64_t a3, uint64_t a4,
                                  uint64_t a5, uint64_t a6, uint64_t a7)
 {
+#if defined(PORT_SWITCH_PPU_FUNC_PROFILE)
+    const bool on = g_ppu_main_ctx && g_active_ctx == g_ppu_main_ctx;
+    uint32_t prev = 0, prev_depth = 0;
+    if (on) {
+        const uint32_t a = 0xC0000000u | (opd & 0x0FFFFFFFu);
+        prev = g_ppu_fn_stamp; g_ppu_fn_stamp = a;
+        prev_depth = g_ppu_fn_depth;
+        if (prev_depth < 256u) g_ppu_fn_stack[prev_depth] = a;
+        g_ppu_fn_depth = prev_depth + 1u;
+    }
     ppu_guest_call(opd, a0, a1, a2, a3, a4, a5, a6, a7);
+    if (on) { g_ppu_fn_stamp = prev; g_ppu_fn_depth = prev_depth; }
+#else
+    ppu_guest_call(opd, a0, a1, a2, a3, a4, a5, a6, a7);
+#endif
 }
 
 #ifdef _WIN32
