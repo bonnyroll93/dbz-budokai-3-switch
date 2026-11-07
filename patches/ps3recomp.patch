@@ -1937,7 +1937,7 @@ index f6e4e31..0144172 100644
      { static int dbg = -1;
        if (dbg < 0) dbg = getenv("SYS_HEAP_DBG") ? 1 : 0;
 diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
-index ac0a7a8..0305965 100644
+index ac0a7a8..56a45c9 100644
 --- a/libs/video/cellGcmSys.c
 +++ b/libs/video/cellGcmSys.c
 @@ -11,6 +11,11 @@
@@ -2147,7 +2147,81 @@ index ac0a7a8..0305965 100644
              return;
          }
          return;
-@@ -1449,6 +1613,17 @@ static void gcm_ref_publish_one(void)
+@@ -1351,26 +1515,40 @@ static void gcm_fifo_resync_why(const char* why, u32* getoff, u32 put)
+      * every one twice. */
+     u32 from = (*getoff <= land) ? *getoff : s_last_ring_off;
+     if (from < land) {
+-        unsigned rescued = 0;
++        unsigned rescued = 0, ucmds = 0;
++        u32 ucmd = 0;
+         for (u32 io = from; io + 8 <= land; io += 4) {
+             u32 ea = gcm_io2ea(io); if (!ea) continue;
+             u32 w = vm_read32(ea);
+-            if ((w >> 29) != 0 || (w & 0x1FFCu) != 0x0050u) continue;
++            if ((w >> 29) != 0) continue;
++            /* A user command (GCM_SET_USER_COMMAND, method 0xEB00) is the
++             * same kind of hazard as a fence: DBZ3 writes one per frame and
++             * its end-of-frame wait (0x002909C0) spins until the handler has
++             * seen it. Skipping it froze the picture for good while audio
++             * played on. Only the last one counts: the handler keeps a
++             * single pending command. */
++            if ((w & 0xFFFFu) == 0xEB00u && ((w >> 18) & 0x7FFu) != 0) {
++                u32 dea = gcm_io2ea(io + 4); if (!dea) continue;
++                ucmd = vm_read32(dea);
++                ucmds++;
++                continue;
++            }
++            if ((w & 0x1FFCu) != 0x0050u) continue;
+             u32 dea = gcm_io2ea(io + 4); if (!dea) continue;
+             gcm_ref_push_at(vm_read32(dea), io);
+             rescued++;
+         }
+-        if (rescued) { static int m = 0; if (m++ < 8)
+-            fprintf(stderr, "[cellGcmSys] resync rescued %u fence(s) from"
+-                    " 0x%08X..0x%08X\n", rescued, from, land); }
++        if (ucmds) cellGcmQueueUserCommand(ucmd);
++        if (rescued || ucmds) { static int m = 0; if (m++ < 8)
++            fprintf(stderr, "[cellGcmSys] resync rescued %u fence(s) and %u user"
++                    " command(s) (last 0x%08X) from 0x%08X..0x%08X\n",
++                    rescued, ucmds, ucmd, from, land); }
+     }
+     *getoff = land;
+ }
+ 
+-static void gcm_fifo_dump_around(u32 getoff)
++static void gcm_fifo_dump_print(u32 getoff)
+ {
+-    static int d = 0;
+-    if (!getenv("GCM_RECDBG") || d++ >= 3) return;
+     for (u32 t = 0; t < GCM_TRACE_N; t++) {
+         u32 k = (s_tr_i + t) % GCM_TRACE_N;
+         if (!s_tr_w[k]) continue;
+@@ -1385,6 +1563,24 @@ static void gcm_fifo_dump_around(u32 getoff)
+         fprintf(stderr, "[FIFODUMP] %+3d io=%08X w=%08X%s\n",
+                 k, io, vm_read32(ea), k ? "" : "   <-- bad word");
+     }
++    fflush(stderr);
++}
++
++static void gcm_fifo_dump_around(u32 getoff)
++{
++    static int d = 0;
++    if (!getenv("GCM_RECDBG") || d++ >= 3) return;
++    gcm_fifo_dump_print(getoff);
++}
++
++/* An unmapped branch is rare and is the only trace of a mis-counted batch, so
++ * the first one is dumped even without GCM_RECDBG (once: ~90 lines). */
++static void gcm_fifo_dump_bad_branch(u32 getoff)
++{
++    static int d = 0;
++    if (getenv("GCM_RECDBG")) { gcm_fifo_dump_around(getoff); return; }
++    if (d++ >= 1) return;
++    gcm_fifo_dump_print(getoff);
+ }
+ 
+ 
+@@ -1449,6 +1645,17 @@ static void gcm_ref_publish_one(void)
   * itself performs guest reads) and never blocks a spinning game thread. */
  static SRWLOCK s_gcm_fifo_lock = SRWLOCK_INIT;
  static void gcm_rsx_process_fifo_unlocked(void);
@@ -2165,7 +2239,7 @@ index ac0a7a8..0305965 100644
  
  /* Kick event: a game thread whose fence wait finds the queue DRY signals the
   * present thread to run the FIFO walker NOW instead of on its next 16 ms
-@@ -1632,6 +1807,9 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1632,6 +1839,9 @@ static void gcm_rsx_process_fifo_unlocked(void)
       * catch up, and the reason is the whole diagnosis. */
      const char* why = "caught-up";
      while (s_fifo_getoff != put && budget-- > 0) {
@@ -2175,7 +2249,25 @@ index ac0a7a8..0305965 100644
          u32 ea = gcm_io2ea(s_fifo_getoff);
          if (!ea) {
              /* get is sitting on an IO offset with no mapping -- the title
-@@ -1762,11 +1940,14 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1713,7 +1923,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+               if (_rd) fprintf(stderr, "[JMP] %08X -> %08X (put=%08X)\n",
+                                s_fifo_getoff, w & 0x1FFFFFFCu, put); }
+             { u32 tgt = w & 0x1FFFFFFCu;
+-              if (!gcm_io2ea(tgt)) { gcm_fifo_bad_branch("JUMP", tgt, w); gcm_fifo_dump_around(s_fifo_getoff); gcm_fifo_resync_why("unmapped-JUMP", &s_fifo_getoff, put); break; }
++              if (!gcm_io2ea(tgt)) { gcm_fifo_bad_branch("JUMP", tgt, w); gcm_fifo_dump_bad_branch(s_fifo_getoff); gcm_fifo_resync_why("unmapped-JUMP", &s_fifo_getoff, put); break; }
+               /* A JUMP to its own address is the "park the RSX here" idiom:
+                * the title leaves it at the write head so the GPU stops if it
+                * catches up, and overwrites it when the next segment is
+@@ -1736,7 +1946,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+         }
+         if ((w & 3) == 2) {                    /* CALL: offset | 2 */
+             { u32 tgt = w & 0x1FFFFFFCu;
+-              if (!gcm_io2ea(tgt)) { gcm_fifo_bad_branch("CALL", tgt, w); gcm_fifo_resync_why("unmapped-CALL", &s_fifo_getoff, put); break; }
++              if (!gcm_io2ea(tgt)) { gcm_fifo_bad_branch("CALL", tgt, w); gcm_fifo_dump_bad_branch(s_fifo_getoff); gcm_fifo_resync_why("unmapped-CALL", &s_fifo_getoff, put); break; }
+               s_fifo_calloff = s_fifo_getoff + 4;
+               s_fifo_getoff  = tgt; }
+             continue;
+@@ -1762,11 +1972,14 @@ static void gcm_rsx_process_fifo_unlocked(void)
                    u32 mi = (method >> 2) & 2047;
                    hist[mi]++; tot[mi] += count;
                    static u64 seen = 0;
@@ -2191,7 +2283,7 @@ index ac0a7a8..0305965 100644
                    }
                } }
              /* NV406E semaphore: OFFSET(0x64) / ACQUIRE(0x68) / RELEASE(0x6C).
-@@ -1807,7 +1988,37 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1807,7 +2020,37 @@ static void gcm_rsx_process_fifo_unlocked(void)
                  s_fifo_getoff += 4 + count * 4;
                  continue;
              }
@@ -2229,7 +2321,7 @@ index ac0a7a8..0305965 100644
                  u32 dea = gcm_io2ea(s_fifo_getoff + 4 + i * 4);
                  if (!dea) break;
                  u32 m = (type == 0) ? method + i * 4 : method;
-@@ -1899,7 +2110,15 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1899,7 +2142,15 @@ static void gcm_rsx_process_fifo_unlocked(void)
                   * same reason the live engine does, and masks them itself. */
                  { static int eng = -1;
                    if (eng < 0) eng = rsx_draw_engine_enabled();
@@ -2246,7 +2338,7 @@ index ac0a7a8..0305965 100644
  
                  /* RSX_LIVE_FEED_DBG=1: what the FIFO actually carries. Counted
                   * for any run, live engine or not, so the method stream and the
-@@ -1927,7 +2146,22 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1927,7 +2178,22 @@ static void gcm_rsx_process_fifo_unlocked(void)
                  } else if (mfull == 0xE920u || mfull == 0xE924u) {
                      cellGcmSetFlipCommand(vm_read32(dea) & 7u);
                  } else if (subch == 0 || (subch == 1 && !s1_2d)) {
@@ -2269,7 +2361,7 @@ index ac0a7a8..0305965 100644
                      /* NV406E_SET_REFERENCE: queue the fence value for PACED
                       * publication (gcm_ref_publish below) instead of letting a
                       * later fence in the same batch overwrite it. */
-@@ -1956,6 +2190,9 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1956,6 +2222,9 @@ static void gcm_rsx_process_fifo_unlocked(void)
          s_fifo_getoff += 4;                    /* unknown word: skip */
      }
  
@@ -2279,7 +2371,7 @@ index ac0a7a8..0305965 100644
      /* Walker watchdog. Everything above recovers from a *recognised* stall --
       * a branch we cannot take, a park the title abandoned. A walker that stops
       * for any other reason simply freezes `get` for the rest of the run and
-@@ -2030,7 +2267,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -2030,7 +2299,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
       *
       * ponytail: append the JUMP at `current` the way the SDK's own callback
       * does, rather than tracking a second copy of the ring's geometry. */
@@ -2288,7 +2380,7 @@ index ac0a7a8..0305965 100644
          u32 ctx = vm_read32(s_gcm_ctx_out_ea);
          u32 begin = ctx ? vm_read32(ctx + 0x0) : 0;
          u32 end   = ctx ? vm_read32(ctx + 0x4) : 0;
-@@ -3372,10 +3609,26 @@ void cellGcmSetUserCommand(u32 cmd)
+@@ -3372,10 +3641,26 @@ void cellGcmSetUserCommand(u32 cmd)
  /* Called when a FIFO consumer retires a user-interrupt method. Publishing
   * the cause and pending marker is atomic; guest code runs later in the pump.
   * Like the driver cause register, multiple pending commands coalesce. */
