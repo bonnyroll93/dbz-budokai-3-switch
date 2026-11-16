@@ -35,7 +35,7 @@ DU_TAIL = 'loc_001DE4F4:\n'
 DU_TAIL_MID = '        ctx->lr = 0x001DE598; func_00019818(ctx);'
 DU_END = 'loc_001DE61C:\n'
 LEVEL_FN = 'void func_00030790(ppu_context* ctx) {\n'
-# TLSF free path: crash-trail builds check the next block's header first
+# TLSF free path: every Switch build checks the next block's header first
 # (dbz3_tlsf_guard.cpp). It is reached through trampolines inside its own
 # source file too, so a linker --wrap does not see every call.
 TLSF_FREE_FN = 'void func_0005494C(ppu_context* ctx) {\n'

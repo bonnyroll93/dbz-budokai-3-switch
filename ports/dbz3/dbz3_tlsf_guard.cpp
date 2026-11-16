@@ -1,5 +1,5 @@
 /*
- * TLSF guard (crash-trail builds): checks the block after the one being freed.
+ * TLSF guard (every Switch build): checks the block after the one being freed.
  *
  * func_0005494C is the free path of a TLSF allocator (reached from the main
  * loop through 0x48088 -> 0x53FA0 -> 0x55010 -> 0x547CC). With r5 = the block
@@ -29,8 +29,12 @@
 #include <cstdint>
 #include <cstdio>
 
-extern "C" void dbz3_trail_event(const char* fmt, ...);
+/* Weak: the guard is in every Switch build, the crash trail only in
+ * crash-trail builds (without it the reports go to stderr only). */
+extern "C" void dbz3_trail_event(const char* fmt, ...) __attribute__((weak));
 extern "C" { extern uint8_t* vm_base; }   /* as dbz3_wtrack.cpp */
+
+#define TRAIL(...) do { if (dbz3_trail_event) dbz3_trail_event(__VA_ARGS__); } while (0)
 
 namespace {
 
@@ -81,7 +85,7 @@ int next_state(uint32_t next, uint32_t prev_free, uint32_t next_free)
 void dump(uint32_t from, uint32_t to)
 {
     for (uint32_t a = from; a < to; a += 16u)
-        dbz3_trail_event("  %08X: %08X %08X %08X %08X", a, vm_read32(a), vm_read32(a + 4u),
+        TRAIL("  %08X: %08X %08X %08X %08X", a, vm_read32(a), vm_read32(a + 4u),
                          vm_read32(a + 8u), vm_read32(a + 12u));
 }
 
@@ -104,7 +108,7 @@ extern "C" int dbz3_tlsf_free_check(ppu_context* ctx)
         /* lr: the allocator function that jumped here; the free wrapper's
          * 0x70-byte frame holds its caller's lr at +0x80. */
         const uint32_t caller = (uint32_t)vm_read64(ctx->gpr[1] + 0x80u);
-        dbz3_trail_event("TLSF BAD #%d (%s): free block=%08X size=%08X next=%08X prev_free=%08X "
+        TRAIL("TLSF BAD #%d (%s): free block=%08X size=%08X next=%08X prev_free=%08X "
                          "next_free=%08X lr=%08X caller=%08X heap=%08X",
                          g_reports + 1, state == 2 ? "unmapped link, repaired" : "links disagree, left",
                          block, size, next, prev_free, next_free,
@@ -112,7 +116,7 @@ extern "C" int dbz3_tlsf_free_check(ppu_context* ctx)
         fprintf(stderr, "[tlsf] BAD free block=%08X size=%08X next=%08X links=%08X/%08X lr=%08X caller=%08X\n",
                 block, size, next, prev_free, next_free, (uint32_t)ctx->lr, caller);
         if (size_ok) {
-            dbz3_trail_event("  block header and the end of its data, then the next header:");
+            TRAIL("  block header and the end of its data, then the next header:");
             dump(block & ~15u, (block & ~15u) + 0x20u);
             dump((next & ~15u) - 0x40u, (next & ~15u) + 0x20u);
         }
@@ -128,6 +132,6 @@ extern "C" int dbz3_tlsf_free_check(ppu_context* ctx)
     }
     /* No sane next block to look at: leave the block out of the free lists
      * (a leak) rather than walk garbage. */
-    dbz3_trail_event("TLSF block %08X not freed (bad size)", block);
+    TRAIL("TLSF block %08X not freed (bad size)", block);
     return 1;
 }
