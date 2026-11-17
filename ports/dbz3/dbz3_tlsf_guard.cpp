@@ -135,3 +135,52 @@ extern "C" int dbz3_tlsf_free_check(ppu_context* ctx)
     TRAIL("TLSF block %08X not freed (bad size)", block);
     return 1;
 }
+
+/* Called first thing in func_000547CC, the free entry (r3 = user pointer).
+ * The block header is at p - 24; its word at +0xC points 16 bytes past the
+ * owning heap's control word, which is read next, then that word + 0xC.
+ * run190 died there reading guest 0xFEFFFFF0: the header of the block being
+ * freed (in use, so the guard in func_0005494C never saw it) held
+ * 0xFF000000, the same value as the earlier overruns. Only when one of these
+ * reads would fault is the free skipped (the block leaks); the header and the
+ * memory before it are logged so the overrunning data can be recognised.
+ * Returns nonzero when the free must be skipped. */
+extern "C" int dbz3_tlsf_free_entry_check(ppu_context* ctx)
+{
+    const uint32_t p = (uint32_t)ctx->gpr[3];
+    if (p == 0) return 0;                          /* free(NULL): the game returns */
+    const uint32_t hdr = p - 24u;
+    const char* why = nullptr;
+    uint32_t owner = 0, heap = 0;
+    if (!mapped(hdr) || !mapped(hdr + 0x8u)) why = "header unmapped";
+    else {
+        owner = vm_read32(hdr + 0xCu);
+        if (owner == 0) return 0;                  /* the game's own path */
+        if (!mapped(owner - 16u)) why = "owner unmapped";
+        else {
+            heap = vm_read32(owner - 16u);
+            if (heap != 0 && !mapped(heap)) why = "heap unmapped";
+        }
+    }
+    if (!why) return 0;
+    if (g_reports < 8) {
+        TRAIL("TLSF BAD #%d (free entry, %s, skipped): ptr=%08X hdr=%08X owner=%08X heap=%08X lr=%08X",
+              g_reports + 1, why, p, hdr, owner, heap, (uint32_t)ctx->lr);
+        fprintf(stderr, "[tlsf] BAD free entry ptr=%08X owner=%08X heap=%08X lr=%08X (%s)\n",
+                p, owner, heap, (uint32_t)ctx->lr, why);
+        /* Guest callers: back chain at 0(r1), saved lr at +16. */
+        uint32_t sp = (uint32_t)ctx->gpr[1];
+        for (int i = 0; i < 6 && mapped(sp); ++i) {
+            sp = vm_read32(sp);
+            if (!mapped(sp) || !mapped(sp + 16u)) break;
+            TRAIL("  caller[%d] %08X", i, (uint32_t)vm_read64(sp + 16u));
+        }
+        if (mapped(hdr & ~15u)) {
+            TRAIL("  memory before the header (overrun data?), then header and user data:");
+            const uint32_t from = (hdr & ~15u) - 0x80u;
+            if (mapped(from)) dump(from, (hdr & ~15u) + 0x30u);
+        }
+        ++g_reports;
+    }
+    return 1;
+}

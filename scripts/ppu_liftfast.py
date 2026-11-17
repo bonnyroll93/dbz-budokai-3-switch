@@ -39,6 +39,9 @@ LEVEL_FN = 'void func_00030790(ppu_context* ctx) {\n'
 # (dbz3_tlsf_guard.cpp). It is reached through trampolines inside its own
 # source file too, so a linker --wrap does not see every call.
 TLSF_FREE_FN = 'void func_0005494C(ppu_context* ctx) {\n'
+# Free entry (user pointer in r3): checks the freed block's own header
+# (run190 crashed there, before the merge check above).
+TLSF_ENTRY_FN = 'void func_000547CC(ppu_context* ctx) {\n'
 
 
 def setters(paths):
@@ -136,13 +139,18 @@ def main():
             sys.exit('ppu_liftfast.py: func_0005494C count changed')
         text = text.replace(TLSF_FREE_FN, TLSF_FREE_FN +
                             '        if (dbz3_tlsf_free_check && dbz3_tlsf_free_check(ctx)) return;\n', 1)
+    if TLSF_ENTRY_FN in text:
+        if text.count(TLSF_ENTRY_FN) != 1:
+            sys.exit('ppu_liftfast.py: func_000547CC count changed')
+        text = text.replace(TLSF_ENTRY_FN, TLSF_ENTRY_FN +
+                            '        if (dbz3_tlsf_free_entry_check && dbz3_tlsf_free_entry_check(ctx)) return;\n', 1)
 
     # Vector stores go through lf_vstore (a memcpy, plus the store hook of the
     # diagnostic PORT_DBZ3_WTRACK build).
     text = text.replace('memcpy(vm_base + (uint32_t)ea,', 'lf_vstore(vm_base + (uint32_t)ea,')
 
     if INCLUDE in text:
-        text = text.replace(INCLUDE, INCLUDE + '\n#include "dbz3_liftfast.h"\nextern "C" void dbz3_du_phase_probe(uint32_t);\nextern "C" int dbz3_du_skip_render(void);\nextern "C" int dbz3_tlsf_free_check(ppu_context*) __attribute__((weak));', 1)
+        text = text.replace(INCLUDE, INCLUDE + '\n#include "dbz3_liftfast.h"\nextern "C" void dbz3_du_phase_probe(uint32_t);\nextern "C" int dbz3_du_skip_render(void);\nextern "C" int dbz3_tlsf_free_check(ppu_context*) __attribute__((weak));\nextern "C" int dbz3_tlsf_free_entry_check(ppu_context*) __attribute__((weak));', 1)
     else:
         sys.exit('ppu_liftfast.py: %s does not include ppu_recomp.h' % src)
 
