@@ -60,6 +60,7 @@ extern "C" uint64_t g_dbz3_adx_sur_calls;   /* dbz3_audio_trace.cpp */
 extern "C" { uint32_t g_dbz3_cur_task_fn = 0; int g_dbz3_cur_pass = 0; }
 #ifdef PORT_DBZ3_CRASH_TRAIL
 extern "C" void dbz3_trail_tasks(const uint32_t* fns, int count);   /* dbz3_crash_trail.cpp */
+extern "C" void dbz3_tlsf_walk(void);                                /* dbz3_tlsf_guard.cpp */
 #endif
 /* Debug menu FRAME CAP (switch_input.c): 60, 30 or 0 = off. */
 extern "C" __attribute__((weak)) int switch_debug_frame_cap(void);
@@ -865,8 +866,16 @@ extern "C" void ps3_indirect_call(ppu_context* ctx);
  *               draws once per frame. Run twice, the queue holds the Dragon
  *               Ball bar twice and the next frame shows a second, offset bar
  *               (run157: a ghost after every multi-step pass; run158: none
- *               with this task skipped in the extra steps). */
-constexpr uint32_t kNoRepeat[] = { 0x001D16C8u };
+ *               with this task skipped in the extra steps).
+ *   0x001A2BC8  Dialog dispatcher and save monitor (object *(0x470F50)).
+ *   0x001A3090  0x1A3090 sets the result (state at +0x58: 4 saved, 5, 3)
+ *               and hands back to 0x1A2BC8, which sets it to 0 on every run.
+ *               The save screen 0x14B190 reads it, but draws, so it runs once
+ *               per image: when an extra step ran 0x1A2BC8 first, the result
+ *               was lost and the prompt waited forever without a cursor
+ *               (run190, run192). Run only in normal steps, the result stays
+ *               until the screen reads it, whatever the task order. */
+constexpr uint32_t kNoRepeat[] = { 0x001D16C8u, 0x001A2BC8u, 0x001A3090u };
 
 int no_repeat(uint32_t fn)
 {
@@ -1398,6 +1407,7 @@ loc_0002911C:
 #endif
 #ifdef PORT_DBZ3_CRASH_TRAIL
     trail_scan_tasks();
+    dbz3_tlsf_walk();   /* dbz3_tlsf_guard.cpp: damaged heap headers */
 #endif
 #ifdef PORT_DBZ3_LOGIC60
     bisect_note_mode();
