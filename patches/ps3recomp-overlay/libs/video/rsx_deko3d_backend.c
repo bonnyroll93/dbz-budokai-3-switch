@@ -1474,7 +1474,7 @@ static void dk_draw_debug_menu(const SwitchDebugSettings* settings, u32 fps_x10,
     labels[DBG_ROW_SCREENSHOT] = "SAVE SCREENSHOT";
     labels[DBG_ROW_RECORD] = settings->recording ? "STOP SCREEN RECORDING" : "START SCREEN RECORDING";
     labels[DBG_ROW_DRAW_START] = draw_start; labels[DBG_ROW_DRAW_STEP] = draw_step;
-    labels[DBG_ROW_DRAW_CAPTURE] = "CAPTURE NEXT DRAW FRAME";
+    labels[DBG_ROW_DRAW_CAPTURE] = "CAPTURE DRAWS IN 5 S (3 FRAMES)";
     labels[DBG_ROW_REBOOT] = "REBOOT APPLICATION"; labels[DBG_ROW_CLOSE] = "CLOSE MENU";
     static const char* const group_name[4] = { "DISPLAY", "PERFORMANCE", "CAPTURE", "SYSTEM" };
     static const int group_first[4] = { DBG_ROW_SCALE, DBG_ROW_FPS, DBG_ROW_SCREENSHOT, DBG_ROW_REBOOT };
@@ -1694,6 +1694,19 @@ static void be_present(void* user, u32 surface)
       }
       gp_mark(GP_SEG, GP_KEY_OVERLAY);
       if (settings.show_fps) dk_draw_fps_overlay();
+      { /* Timed draw capture armed from the debug menu: countdown, top left. */
+          const int cd = switch_debug_draw_capture_countdown();
+          if (cd >= 0) {
+              char text[32];
+              const u32 px = s_dk.width >= 1920 ? 4u : 3u;
+              if (cd > 0) snprintf(text, sizeof text, "CAPTURE IN %d", cd);
+              else snprintf(text, sizeof text, "CAPTURE");
+              DkScissor bg = { 12u * px, 12u * px, 56u * px, 8u * px };
+              dkCmdBufSetScissors(s_dk.cmd, 0, &bg, 1);
+              dkCmdBufClearColorFloat(s_dk.cmd, 0, DkColorMask_RGBA, 0.0f, 0.0f, 0.0f, 1.0f);
+              dk_debug_text(bg.x + px, bg.y + px, text, px, 1.0f, 0.3f, 0.2f);
+          }
+      }
       if (settings.show_frame_ms) {
           char ms[32];
           const u32 px = s_dk.width >= 1920 ? 4u : 3u;
@@ -2866,6 +2879,11 @@ static int dk_init_device(u32 width, u32 height)
       s_dk.flush_ops = f ? 512u : DK_FLUSH_OPS; if (f) fclose(f); }
     { FILE* f = fopen("sdmc:/switch/dbz-budokai-3-switch/depth-clamp", "r");
       s_dk.depth_clamp = f != NULL; if (f) fclose(f); }
+    /* Always logged (dk_err): which SD switches this run read, so an A/B test
+     * can be checked in the light build. */
+    dk_err("sd switches: present-sync %s, texbatch-off %s, flush512 %s, depth-clamp %s\n",
+           s_dk.async_present ? "no" : "YES", s_dk.texbatch_off ? "YES" : "no",
+           s_dk.flush_ops == 512u ? "YES" : "no", s_dk.depth_clamp ? "YES" : "no");
     dk_log("depth clamp %s\n", s_dk.depth_clamp ? "on" : "off");
     dk_log("texbatch %s, flush every %u ops\n", s_dk.texbatch_off ? "off" : "on", s_dk.flush_ops);
     dk_log("present: %s\n", s_dk.async_present && s_dk.set_ring[1]

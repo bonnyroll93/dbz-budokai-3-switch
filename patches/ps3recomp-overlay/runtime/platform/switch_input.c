@@ -52,7 +52,15 @@ static atomic_int debug_reboot;
 static atomic_int debug_reboot_error;
 static atomic_int debug_screenshot;
 static atomic_int debug_recording;
-static atomic_int debug_draw_capture;
+/* Timed draw capture: the menu stops game input, so effects that need the
+ * player to move (DU flight speed lines) are gone once it closes. The row arms
+ * kCaptureShots captures, the first kCaptureDelayMs after the menu closes,
+ * then one every kCaptureGapMs. */
+#define kCaptureDelayMs 5000u
+#define kCaptureGapMs 500u
+#define kCaptureShots 3
+static atomic_int debug_draw_capture;           /* shots left */
+static atomic_ullong debug_draw_capture_at;     /* system tick of the next shot */
 static atomic_int debug_draw_start;
 static atomic_int debug_draw_step = 8;
 static atomic_int debug_gpu_aa;
@@ -346,7 +354,9 @@ int switch_debug_input(uint64_t buttons)
             } else if (row == DBG_ROW_DRAW_STEP) {
                 atomic_store(&debug_draw_step, atomic_load(&debug_draw_step) == 8 ? 1 : 8);
             } else if (row == DBG_ROW_DRAW_CAPTURE && (pressed & HidNpadButton_A)) {
-                atomic_store(&debug_draw_capture, 1);
+                atomic_store(&debug_draw_capture_at, armGetSystemTick() +
+                             armNsToTicks((u64)kCaptureDelayMs * 1000000ull));
+                atomic_store(&debug_draw_capture, kCaptureShots);
                 atomic_store(&debug_menu, 0);
                 debug_suppress_until_release = 1;
             } else if (row == DBG_ROW_REBOOT && (pressed & HidNpadButton_A)) {
@@ -371,9 +381,21 @@ int switch_debug_take_screenshot(void) { return atomic_exchange(&debug_screensho
 int switch_debug_take_fps_reset(void) { return atomic_exchange(&debug_fps_reset, 0); }
 int switch_debug_recording(void) { return atomic_load(&debug_recording); }
 void switch_debug_stop_recording(void) { atomic_store(&debug_recording, 0); }
+int switch_debug_draw_capture_countdown(void)
+{
+    if (atomic_load(&debug_draw_capture) <= 0) return -1;
+    const u64 now = armGetSystemTick(), at = atomic_load(&debug_draw_capture_at);
+    if (now >= at) return 0;
+    return (int)((armTicksToNs(at - now) + 999999999ull) / 1000000000ull);
+}
+
 int switch_debug_take_draw_capture(int *start, int *step)
 {
-    if (!atomic_exchange(&debug_draw_capture, 0)) return 0;
+    if (atomic_load(&debug_draw_capture) <= 0) return 0;
+    const u64 now = armGetSystemTick();
+    if (now < atomic_load(&debug_draw_capture_at)) return 0;
+    atomic_store(&debug_draw_capture_at, now + armNsToTicks((u64)kCaptureGapMs * 1000000ull));
+    atomic_fetch_sub(&debug_draw_capture, 1);
     if (start) *start = atomic_load(&debug_draw_start);
     if (step) *step = atomic_load(&debug_draw_step);
     return 1;

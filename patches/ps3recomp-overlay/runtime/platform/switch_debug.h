@@ -59,5 +59,8 @@ int switch_debug_take_fps_reset(void);
 int switch_debug_recording(void);
 void switch_debug_stop_recording(void);
 int switch_debug_take_draw_capture(int *start, int *step);
+/* Timed draw capture: seconds before the next shot (0 = shooting), -1 when
+ * none is armed. */
+int switch_debug_draw_capture_countdown(void);
 
 #endif
