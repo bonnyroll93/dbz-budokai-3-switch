@@ -2598,10 +2598,18 @@ index 1fcd485..618c41c 100644
  s32 cellRescSetFlipHandler(void (*handler)(u32));
  s32 cellRescSetVBlankHandler(void (*handler)(u32));
 diff --git a/libs/video/rsx_dispatch.c b/libs/video/rsx_dispatch.c
-index d105230..9996137 100644
+index d105230..5e148b7 100644
 --- a/libs/video/rsx_dispatch.c
 +++ b/libs/video/rsx_dispatch.c
-@@ -300,6 +300,27 @@ static void vtx_const_fold(rsx_dispatch* rsx, u32 m, u32 arg)
+@@ -250,6 +250,7 @@ void rsx_dispatch_seed_transform_constants(rsx_dispatch* rsx, const u32* words,
+     if (count > max_words)
+         count = max_words;
+     memcpy(rsx->constants, words, count * sizeof(u32));
++    rsx->const_gen++;
+ }
+ 
+ /* Every NV4097_SET_VERTEX_DATA* variant writes the same constant ("current")
+@@ -300,6 +301,29 @@ static void vtx_const_fold(rsx_dispatch* rsx, u32 m, u32 arg)
      }
  }
  
@@ -2618,8 +2626,10 @@ index d105230..9996137 100644
 +        if (method >= M_VP_UPLOAD_CONST && method < M_VP_UPLOAD_CONST + 32 * 4) {
 +            const u32 word = (method - M_VP_UPLOAD_CONST) >> 2;
 +            const u32 slot = rsx->regs[M_VP_UPLOAD_CONST_ID >> 2] + (word >> 2);
-+            if (slot < RSX_DSP_NUM_CONSTANTS)
++            if (slot < RSX_DSP_NUM_CONSTANTS && rsx->constants[slot][word & 3] != arg) {
 +                rsx->constants[slot][word & 3] = arg;
++                rsx->const_gen++;
++            }
 +        } else if (method != M_VP_UPLOAD_CONST_ID) {
 +            rsx_dispatch_method(rsx, method, arg);   /* not expected; exact path */
 +        }
@@ -2629,7 +2639,7 @@ index d105230..9996137 100644
  void rsx_dispatch_method(rsx_dispatch* rsx, u32 method, u32 arg)
  {
      method &= 0xFFFFC;
-@@ -329,8 +350,10 @@ void rsx_dispatch_method(rsx_dispatch* rsx, u32 method, u32 arg)
+@@ -329,8 +353,10 @@ void rsx_dispatch_method(rsx_dispatch* rsx, u32 method, u32 arg)
          const u32 lane = ((method - M_VP_UPLOAD_INST) >> 2) & 3;
          u32* load = &rsx->regs[M_VP_UPLOAD_FROM_ID >> 2];
          const u32 pos = *load * 4 + lane;
@@ -2641,11 +2651,34 @@ index d105230..9996137 100644
          if (lane == 3)
              (*load)++;
          return;
+@@ -342,8 +368,10 @@ void rsx_dispatch_method(rsx_dispatch* rsx, u32 method, u32 arg)
+     if (method >= M_VP_UPLOAD_CONST && method < M_VP_UPLOAD_CONST + 32 * 4) {
+         const u32 word = (method - M_VP_UPLOAD_CONST) >> 2;
+         const u32 slot = rsx->regs[M_VP_UPLOAD_CONST_ID >> 2] + (word >> 2);
+-        if (slot < RSX_DSP_NUM_CONSTANTS)
++        if (slot < RSX_DSP_NUM_CONSTANTS && rsx->constants[slot][word & 3] != arg) {
+             rsx->constants[slot][word & 3] = arg;
++            rsx->const_gen++;
++        }
+         /* RSX_CONST_LOG=<lo>,<hi>: every transform-constant upload into that
+          * slot range (first 400) -- what a shader's constants really were. */
+         { static int lo = -2, hi = 0, n = 0;
 diff --git a/libs/video/rsx_dispatch.h b/libs/video/rsx_dispatch.h
-index dab4380..aafb346 100644
+index dab4380..eab8fbe 100644
 --- a/libs/video/rsx_dispatch.h
 +++ b/libs/video/rsx_dispatch.h
-@@ -136,6 +136,9 @@ struct rsx_dispatch {
+@@ -113,6 +113,10 @@ struct rsx_dispatch {
+     u32 regs[RSX_DSP_NUM_REGS];       /* register file: regs[method >> 2]   */
+     u32 vp[RSX_DSP_VP_WORDS];         /* transform (vertex) program words   */
+     u32 constants[RSX_DSP_NUM_CONSTANTS][4]; /* vec4 f32 bit patterns       */
++    /* Bumped only when a constant upload changes a stored value (the title
++     * re-uploads identical values before most draws: run228, 78% of rebinds
++     * changed nothing), so the engine rebinds the block only on real change. */
++    u32 const_gen;
+ 
+     rsx_dispatch_sink sink;
+ 
+@@ -136,6 +140,9 @@ struct rsx_dispatch {
       * emits no inline arrays at all, still lost an order of magnitude of
       * poll rate in the regression gate purely from the added stride. */
      u8  inline_data[RSX_DSP_INLINE_MAX_BYTES];
@@ -2655,7 +2688,7 @@ index dab4380..aafb346 100644
  };
  
  /* ---- lifecycle -------------------------------------------------------- */
-@@ -150,6 +153,11 @@ void rsx_dispatch_seed_transform_constants(rsx_dispatch* rsx, const u32* words,
+@@ -150,6 +157,11 @@ void rsx_dispatch_seed_transform_constants(rsx_dispatch* rsx, const u32* words,
  
  /* Dispatch one register write. */
  void rsx_dispatch_method(rsx_dispatch* rsx, u32 method, u32 arg);

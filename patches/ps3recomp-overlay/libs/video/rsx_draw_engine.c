@@ -96,7 +96,6 @@ extern u32 ppu_vm_size;
 /* NV4097_SET_TRANSFORM_CONSTANT: the window every vertex constant write uses
  * (rsx_dispatch.c M_VP_UPLOAD_CONST). Any write there invalidates vp_cb. */
 #define ENG_M_VP_UPLOAD_CONST 0x1F00u
-static u32 s_vp_const_serial;
 #define ENG_FP_MAX_BYTES   0x10000u
 
 #define M_ALPHA_TEST_ENABLE   0x0304
@@ -213,7 +212,7 @@ static struct {
     u8* tex_staging;
     u32 tex_staging_cap;
     u8* vp_cb;
-    u32 vp_cb_serial;      /* s_vp_const_serial when vp_cb was filled */
+    u32 vp_cb_serial;      /* g.rsx.const_gen when vp_cb was filled */
     int vp_cb_valid;
     u8* fp_cb;
     u32 fp_cb_cap;
@@ -3683,13 +3682,15 @@ static void sink_end(void* user, const rsx_dispatch* r)
     g.be->bind_targets(g.be->user, handles, n_targets, depth_handle);
     g.be->bind_pipeline(g.be->user, pipeline);
     /* Rebuild and rebind the 8 KiB vertex constant block only when a constant
-     * upload or the viewport epilogue changed it since the last draw; the
-     * backend then reuses its copy instead of writing it again. */
-    if (!g.vp_cb_valid || g.vp_cb_serial != s_vp_const_serial ||
+     * upload changed a stored value (rsx_dispatch const_gen: run228, 78% of the
+     * uploads before a draw rewrote identical values) or the viewport epilogue
+     * changed since the last draw; the backend then reuses its copy instead of
+     * writing it again. */
+    if (!g.vp_cb_valid || g.vp_cb_serial != g.rsx.const_gen ||
         memcmp(g.vp_cb + RSX_DSP_NUM_CONSTANTS * 16u, xf, sizeof xf) != 0) {
         memcpy(g.vp_cb, g.rsx.constants, RSX_DSP_NUM_CONSTANTS * 16u);
         memcpy(g.vp_cb + RSX_DSP_NUM_CONSTANTS * 16u, xf, sizeof xf);
-        g.vp_cb_serial = s_vp_const_serial;
+        g.vp_cb_serial = g.rsx.const_gen;
         g.vp_cb_valid = 1;
         g.be->bind_vs_constants(g.be->user, g.vp_cb, ENG_VP_CB_BYTES);
     }
@@ -3962,14 +3963,12 @@ void rsx_draw_engine_method(u32 method, u32 arg)
      * (0xE9xx, 0xEBxx) encode the subchannel bits as part of the address;
      * preserve them with the wider mask. */
     u32 m = (method >= 0xE000u) ? (method & 0xFFFCu) : (method & 0x1FFCu);
-    if (m >= ENG_M_VP_UPLOAD_CONST && m < ENG_M_VP_UPLOAD_CONST + 32u * 4u) s_vp_const_serial++;
     rsx_dispatch_method(&g.rsx, m, arg);
 }
 
 int rsx_draw_engine_constant_burst(u32 first_method, const u8* be_words, u32 count)
 {
     if (!g.ready) return 0;
-    s_vp_const_serial++;
     rsx_dispatch_constant_burst(&g.rsx, first_method & 0x1FFCu, be_words, count);
     return 1;
 }

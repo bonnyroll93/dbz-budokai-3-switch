@@ -117,8 +117,41 @@ static u32 s_views_n;
 typedef struct { u32 used, fmt, w, h; } mt_target;
 static mt_target s_targets[MT_TARGETS];
 
+/* ---- redundant state ------------------------------------------------------ */
+/* The engine binds the whole state before every draw (run226: ~360 draws per
+ * image, every bind recorded and replayed each time). The real backend keeps
+ * what was bound until the next bind (rsx_deko3d_backend.c be_bind_*, applied
+ * by be_draw), so a bind equal to the last one recorded is dropped. What was
+ * last recorded is forgotten (s_last_valid = 0) at every buffer hand-over and
+ * at every recorded call that is not a bind or a draw (clears, blits,
+ * uploads, releases, present) and every direct call: after those the full
+ * state is recorded again, as before. The fragment constants are compared
+ * against their last copy in the current buffer, the one the backend points
+ * at. SD switch render-dedup-off records every bind. */
+enum {
+    LV_TARGETS = 1u << 0, LV_PIPE = 1u << 1, LV_TEX = 1u << 2, LV_VTEX = 1u << 3,
+    LV_VIEWPORT = 1u << 4, LV_SCISSOR = 1u << 5, LV_STENCIL = 1u << 6, LV_PS = 1u << 7,
+};
+static int s_dedup = 1;
+static u32 s_last_valid;
+static size_t s_last_ps_off;      /* payload offset in s_cur of the last OP_PS_CONST */
+
+/* Vertex constants across buffers. The backend keeps a pointer to the last
+ * block it was given, inside the buffer it came from; the engine rebinds the
+ * block only when a constant really changed (rsx_dispatch const_gen), so a
+ * buffer's first draws may have no block of their own while the previous
+ * buffer is already free and being refilled. Each buffer therefore gets its
+ * own copy before its first draw: the last block is kept aside at hand-over
+ * (one copy per buffer) and recorded again when needed. */
+static int s_vs_in_buf;           /* an OP_VS_CONST was recorded in s_cur */
+static size_t s_vs_last_off;      /* its payload offset in s_cur */
+static u8* s_vs_shadow;
+static u32 s_vs_shadow_bytes, s_vs_shadow_cap;
+static int s_vs_shadow_valid, s_vs_shadow_has_data;
+
 /* ---- statistics (non-light builds) --------------------------------------- */
 #if defined(__SWITCH__) && !defined(PORT_DBZ3_LIGHT_BUILD)
+static unsigned long long s_skipped[OP_COUNT];
 static unsigned long long s_count[OP_COUNT], s_bytes, s_replays, s_replay_ticks, s_max_len;
 static unsigned long long s_wait_full_ticks, s_wait_drain_ticks, s_drains;
 static u64 s_window_t0;
@@ -138,17 +171,22 @@ static void stats_window(void)
                 (unsigned long long)(mt_ticks_to_ns(s_wait_drain_ticks) / 1000000ull), s_drains);
         for (int i = 0; i < OP_COUNT; i++)
             if (s_count[i]) fprintf(s_log, "  %s=%llu\n", k_op_name[i], s_count[i]);
+        for (int i = 0; i < OP_COUNT; i++)
+            if (s_skipped[i]) fprintf(s_log, "  skipped_%s=%llu\n", k_op_name[i], s_skipped[i]);
         fflush(s_log);
     }
     memset(s_count, 0, sizeof s_count);
+    memset(s_skipped, 0, sizeof s_skipped);
     s_bytes = s_replays = s_replay_ticks = s_max_len = 0;
     s_wait_full_ticks = s_wait_drain_ticks = s_drains = 0;
     s_window_t0 = now;
 }
 #define COUNT(op) (s_count[op]++)
+#define SKIPPED(op) (s_skipped[op]++)
 #define TICK() mt_tick()
 #else
 #define COUNT(op) ((void)0)
+#define SKIPPED(op) ((void)0)
 #define TICK() 0ull
 #endif
 
@@ -306,8 +344,29 @@ static void* draw_thread(void* arg)
 
 /* Under s_rec_lock: give the current buffer to the draw thread (or replay it
  * here in sync mode) and take an empty one. Waits while two are pending. */
+static void vs_keep_aside(void)
+{
+    if (!s_vs_in_buf || !s_cur) return;
+    const p_const* c = (const p_const*)(s_cur->data + s_vs_last_off);
+    const u32 n = c->has_data ? c->bytes : 0;
+    if (n > s_vs_shadow_cap) {
+        u8* nb = (u8*)realloc(s_vs_shadow, n);
+        if (!nb) { s_vs_shadow_valid = 0; s_vs_in_buf = 0; return; }
+        s_vs_shadow = nb;
+        s_vs_shadow_cap = n;
+    }
+    if (n) memcpy(s_vs_shadow, c + 1, n);
+    s_vs_shadow_bytes = c->bytes;
+    s_vs_shadow_has_data = c->has_data;
+    s_vs_shadow_valid = 1;
+    s_vs_in_buf = 0;
+}
+
 static void hand_over(void)
 {
+    s_last_valid = 0;              /* the next buffer starts with the full state */
+    vs_keep_aside();
+    s_vs_in_buf = 0;
     if (!s_cur || !s_cur->len) return;
     if (!s_threaded) { replay_timed(s_cur); return; }
     const u64 t0 = TICK();
@@ -363,6 +422,15 @@ static u8* rec(u32 op, size_t payload)
     cmd_hdr* h = (cmd_hdr*)(cb->data + cb->len);
     h->op = op; h->size = (u32)size;
     cb->len += size;
+    switch (op) {
+    case OP_BIND_TARGETS: case OP_BIND_PIPELINE: case OP_VS_CONST: case OP_PS_CONST:
+    case OP_BIND_TEX: case OP_BIND_VTEX: case OP_VIEWPORT: case OP_SCISSOR:
+    case OP_STENCIL_REF: case OP_DRAW:
+        break;
+    default:
+        s_last_valid = 0;          /* clears, blits, uploads, releases, present */
+        break;
+    }
     COUNT(op);
 #if defined(__SWITCH__) && !defined(PORT_DBZ3_LIGHT_BUILD)
     s_bytes += size;
@@ -405,8 +473,27 @@ REC_U32(px_color_target_release, OP_CT_RELEASE, color_target_release,
         if (v < MT_TARGETS) s_targets[v].used = 0)
 REC_U32(px_depth_target_release, OP_DT_RELEASE, depth_target_release, (void)0)
 REC_U32(px_pipeline_release, OP_PIPE_RELEASE, pipeline_release, (void)0)
-REC_U32(px_bind_pipeline, OP_BIND_PIPELINE, bind_pipeline, (void)0)
-REC_U32(px_set_stencil_ref, OP_STENCIL_REF, set_stencil_ref, (void)0)
+/* A bind of one u32 that is dropped when it equals the last one recorded. */
+#define REC_U32_STATE(name, op, field, bit)                                   \
+    static u32 name##_last;                                                   \
+    static void name(void* user, u32 v)                                      \
+    {                                                                         \
+        (void)user;                                                           \
+        LOCK();                                                               \
+        if (s_dedup && (s_last_valid & (bit)) && name##_last == v) {          \
+            SKIPPED(op);                                                      \
+            UNLOCK();                                                         \
+            return;                                                           \
+        }                                                                     \
+        u32* c = (u32*)rec(op, sizeof(u32));                                  \
+        if (!c) DIRECT(s_real->field(s_real->user, v));                       \
+        *c = v;                                                               \
+        name##_last = v;                                                      \
+        s_last_valid |= (bit);                                                \
+        UNLOCK();                                                             \
+    }
+REC_U32_STATE(px_bind_pipeline, OP_BIND_PIPELINE, bind_pipeline, LV_PIPE)
+REC_U32_STATE(px_set_stencil_ref, OP_STENCIL_REF, set_stencil_ref, LV_STENCIL)
 
 static void px_color_target_write(void* user, u32 surface, u32 x, u32 y, u32 w, u32 h,
                                   const void* rows, u32 row_bytes)
@@ -420,21 +507,44 @@ static void px_color_target_write(void* user, u32 surface, u32 x, u32 y, u32 w, 
     if (n && rows) memcpy(c + 1, rows, n);
     UNLOCK();
 }
+static p_bind_targets s_last_targets;
 static void px_bind_targets(void* user, const u32* surfaces, u32 count, u32 depth)
 {
     (void)user;
     LOCK();
-    p_bind_targets* c = count <= RSX_BE_MAX_COLOR_TARGETS
-        ? (p_bind_targets*)rec(OP_BIND_TARGETS, sizeof *c) : NULL;
+    p_bind_targets t;
+    int fits = count <= RSX_BE_MAX_COLOR_TARGETS;
+    if (fits) {
+        t.count = count; t.depth = depth;
+        memset(t.surfaces, 0, sizeof t.surfaces);
+        if (count && surfaces) memcpy(t.surfaces, surfaces, count * sizeof(u32));
+        if (s_dedup && (s_last_valid & LV_TARGETS) && !memcmp(&t, &s_last_targets, sizeof t)) {
+            SKIPPED(OP_BIND_TARGETS);
+            UNLOCK();
+            return;
+        }
+    }
+    p_bind_targets* c = fits ? (p_bind_targets*)rec(OP_BIND_TARGETS, sizeof *c) : NULL;
     if (!c) DIRECT(s_real->bind_targets(s_real->user, surfaces, count, depth));
-    c->count = count; c->depth = depth;
-    memset(c->surfaces, 0, sizeof c->surfaces);
-    if (count && surfaces) memcpy(c->surfaces, surfaces, count * sizeof(u32));
+    *c = t;
+    s_last_targets = t;
+    s_last_valid |= LV_TARGETS;
     UNLOCK();
 }
 static void px_const(u32 op, const void* data, u32 bytes)
 {
     LOCK();
+    /* The fragment block: dropped when it equals its last copy in this
+     * buffer, which the backend still points at when the draw replays. */
+    if (op == OP_PS_CONST && s_dedup && (s_last_valid & LV_PS)) {
+        const p_const* last = (const p_const*)(s_cur->data + s_last_ps_off);
+        if (last->bytes == bytes && last->has_data == (data != NULL) &&
+            (!data || !bytes || !memcmp(last + 1, data, bytes))) {
+            SKIPPED(op);
+            UNLOCK();
+            return;
+        }
+    }
     p_const* c = (p_const*)rec(op, sizeof *c + (data ? bytes : 0));
     if (!c) {
         if (op == OP_VS_CONST) DIRECT(s_real->bind_vs_constants(s_real->user, data, bytes));
@@ -443,6 +553,14 @@ static void px_const(u32 op, const void* data, u32 bytes)
     c->bytes = bytes;
     c->has_data = data != NULL;
     if (data && bytes) memcpy(c + 1, data, bytes);
+    if (op == OP_VS_CONST) {
+        s_vs_last_off = (size_t)((const u8*)c - s_cur->data);
+        s_vs_in_buf = 1;
+    }
+    if (op == OP_PS_CONST) {
+        s_last_ps_off = (size_t)((const u8*)c - s_cur->data);
+        s_last_valid |= LV_PS;
+    }
     UNLOCK();
 }
 /* Vertex constants are copied whole: run132 tried row deltas, but more than
@@ -450,64 +568,103 @@ static void px_const(u32 op, const void* data, u32 bytes)
  * compare only added work. */
 static void px_bind_vs_constants(void* user, const void* data, u32 bytes) { (void)user; px_const(OP_VS_CONST, data, bytes); }
 static void px_bind_ps_constants(void* user, const void* data, u32 bytes) { (void)user; px_const(OP_PS_CONST, data, bytes); }
+/* Texture binds are built in a zeroed local first (padding included), so an
+ * equal bind compares equal byte for byte; a false "different" only records
+ * the bind, as before. */
+static p_bind_tex s_last_tex;
 static void px_bind_textures(void* user, const u32* textures, const rsx_be_sampler_desc* samplers, u32 mask)
 {
     (void)user;
     LOCK();
-    p_bind_tex* c = (p_bind_tex*)rec(OP_BIND_TEX, sizeof *c);
-    if (!c) {
-        u32 t[RSX_BE_MAX_TEXTURES] = {0};
-        for (u32 i = 0; i < RSX_BE_MAX_TEXTURES; i++)
-            if ((mask & (1u << i)) && textures) t[i] = resolve_tex(textures[i]);
-        DIRECT(s_real->bind_textures(s_real->user, t, samplers, mask));
-    }
-    c->mask = mask;
-    memset(c->tex, 0, sizeof c->tex);
-    memset(c->smp, 0, sizeof c->smp);
+    p_bind_tex t;
+    memset(&t, 0, sizeof t);
+    t.mask = mask;
     for (u32 i = 0; i < RSX_BE_MAX_TEXTURES; i++) {
         if (!(mask & (1u << i))) continue;
-        if (textures) c->tex[i] = textures[i];
-        if (samplers) c->smp[i] = samplers[i];
+        if (textures) t.tex[i] = textures[i];
+        if (samplers) memcpy(&t.smp[i], &samplers[i], sizeof t.smp[i]);
     }
+    if (s_dedup && (s_last_valid & LV_TEX) && !memcmp(&t, &s_last_tex, sizeof t)) {
+        SKIPPED(OP_BIND_TEX);
+        UNLOCK();
+        return;
+    }
+    p_bind_tex* c = (p_bind_tex*)rec(OP_BIND_TEX, sizeof *c);
+    if (!c) {
+        u32 r[RSX_BE_MAX_TEXTURES] = {0};
+        for (u32 i = 0; i < RSX_BE_MAX_TEXTURES; i++)
+            if ((mask & (1u << i)) && textures) r[i] = resolve_tex(textures[i]);
+        DIRECT(s_real->bind_textures(s_real->user, r, samplers, mask));
+    }
+    memcpy(c, &t, sizeof t);
+    memcpy(&s_last_tex, &t, sizeof t);
+    s_last_valid |= LV_TEX;
     UNLOCK();
 }
+static p_bind_vtex s_last_vtex;
 static void px_bind_vertex_textures(void* user, const u32* textures, const rsx_be_sampler_desc* samplers, u32 mask)
 {
     (void)user;
     LOCK();
-    p_bind_vtex* c = (p_bind_vtex*)rec(OP_BIND_VTEX, sizeof *c);
-    if (!c) {
-        u32 t[RSX_BE_MAX_VERTEX_TEXTURES] = {0};
-        for (u32 i = 0; i < RSX_BE_MAX_VERTEX_TEXTURES; i++)
-            if ((mask & (1u << i)) && textures) t[i] = resolve_tex(textures[i]);
-        DIRECT(s_real->bind_vertex_textures(s_real->user, t, samplers, mask));
-    }
-    c->mask = mask;
-    memset(c->tex, 0, sizeof c->tex);
-    memset(c->smp, 0, sizeof c->smp);
+    p_bind_vtex t;
+    memset(&t, 0, sizeof t);
+    t.mask = mask;
     for (u32 i = 0; i < RSX_BE_MAX_VERTEX_TEXTURES; i++) {
         if (!(mask & (1u << i))) continue;
-        if (textures) c->tex[i] = textures[i];
-        if (samplers) c->smp[i] = samplers[i];
+        if (textures) t.tex[i] = textures[i];
+        if (samplers) memcpy(&t.smp[i], &samplers[i], sizeof t.smp[i]);
     }
+    if (s_dedup && (s_last_valid & LV_VTEX) && !memcmp(&t, &s_last_vtex, sizeof t)) {
+        SKIPPED(OP_BIND_VTEX);
+        UNLOCK();
+        return;
+    }
+    p_bind_vtex* c = (p_bind_vtex*)rec(OP_BIND_VTEX, sizeof *c);
+    if (!c) {
+        u32 r[RSX_BE_MAX_VERTEX_TEXTURES] = {0};
+        for (u32 i = 0; i < RSX_BE_MAX_VERTEX_TEXTURES; i++)
+            if ((mask & (1u << i)) && textures) r[i] = resolve_tex(textures[i]);
+        DIRECT(s_real->bind_vertex_textures(s_real->user, r, samplers, mask));
+    }
+    memcpy(c, &t, sizeof t);
+    memcpy(&s_last_vtex, &t, sizeof t);
+    s_last_valid |= LV_VTEX;
     UNLOCK();
 }
+static p_viewport s_last_vp;
 static void px_set_viewport(void* user, float x, float y, float w, float h)
 {
     (void)user;
     LOCK();
+    const p_viewport v = { x, y, w, h };
+    if (s_dedup && (s_last_valid & LV_VIEWPORT) && !memcmp(&v, &s_last_vp, sizeof v)) {
+        SKIPPED(OP_VIEWPORT);
+        UNLOCK();
+        return;
+    }
     p_viewport* c = (p_viewport*)rec(OP_VIEWPORT, sizeof *c);
     if (!c) DIRECT(s_real->set_viewport(s_real->user, x, y, w, h));
-    c->x = x; c->y = y; c->w = w; c->h = h;
+    *c = v;
+    s_last_vp = v;
+    s_last_valid |= LV_VIEWPORT;
     UNLOCK();
 }
+static p_scissor s_last_sc;
 static void px_set_scissor(void* user, u32 x, u32 y, u32 w, u32 h)
 {
     (void)user;
     LOCK();
+    const p_scissor s = { x, y, w, h };
+    if (s_dedup && (s_last_valid & LV_SCISSOR) && !memcmp(&s, &s_last_sc, sizeof s)) {
+        SKIPPED(OP_SCISSOR);
+        UNLOCK();
+        return;
+    }
     p_scissor* c = (p_scissor*)rec(OP_SCISSOR, sizeof *c);
     if (!c) DIRECT(s_real->set_scissor(s_real->user, x, y, w, h));
-    c->x = x; c->y = y; c->w = w; c->h = h;
+    *c = s;
+    s_last_sc = s;
+    s_last_valid |= LV_SCISSOR;
     UNLOCK();
 }
 static void px_draw(void* user, rsx_topology topology, const void* vertices, u32 vertex_count,
@@ -518,6 +675,24 @@ static void px_draw(void* user, rsx_topology topology, const void* vertices, u32
     const int in_place = vertices && g_rsx_mt_verts_stable;
     const size_t vbytes = (vertices && !in_place) ? (((size_t)vertex_count * stride + 7u) & ~(size_t)7u) : 0;
     const size_t ibytes = indices ? (size_t)index_count * sizeof(u32) : 0;
+    /* This buffer's own copy of the vertex constants, before its first draw.
+     * The block and the draw must land in the same buffer: hand over first if
+     * the two would not fit (rec hands over only on a buffer with data). */
+    if (!s_vs_in_buf && s_vs_shadow_valid) {
+        const size_t vs_rec = (sizeof(cmd_hdr) + sizeof(p_const) +
+                               (s_vs_shadow_has_data ? s_vs_shadow_bytes : 0) + 7u) & ~(size_t)7u;
+        const size_t dr_rec = (sizeof(cmd_hdr) + sizeof(p_draw) + vbytes + ibytes + 7u) & ~(size_t)7u;
+        if (s_cur->len && s_cur->len + vs_rec + dr_rec > ((size_t)16 << 20)) hand_over();
+        p_const* v = (p_const*)rec(OP_VS_CONST, vs_rec - sizeof(cmd_hdr));
+        if (v) {
+            v->bytes = s_vs_shadow_bytes;
+            v->has_data = s_vs_shadow_has_data;
+            if (s_vs_shadow_has_data && s_vs_shadow_bytes)
+                memcpy(v + 1, s_vs_shadow, s_vs_shadow_bytes);
+            s_vs_last_off = (size_t)((const u8*)v - s_cur->data);
+            s_vs_in_buf = 1;
+        }
+    }
     p_draw* c = (p_draw*)rec(OP_DRAW, sizeof *c + vbytes + ibytes);
     if (!c) DIRECT(s_real->draw(s_real->user, topology, vertices, vertex_count, stride, indices, index_count));
     c->topology = (u32)topology;
@@ -689,6 +864,9 @@ const rsx_draw_backend* rsx_mt_backend_wrap(const rsx_draw_backend* real)
     s_free_n = MT_BUFS;
     s_cur = s_free[--s_free_n];
     s_threaded = !sd_flag("render-mt-sync");
+    s_dedup = !sd_flag("render-dedup-off");
+    fprintf(stderr, "[bemt] redundant binds %s\n",
+            s_dedup ? "dropped" : "recorded (render-dedup-off)");
     if (s_threaded) {
         pthread_t t;
         pthread_attr_t a;
