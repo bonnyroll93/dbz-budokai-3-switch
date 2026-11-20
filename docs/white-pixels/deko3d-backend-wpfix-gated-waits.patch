@@ -1,0 +1,185 @@
+diff --git a/patches/ps3recomp-overlay/libs/video/rsx_deko3d_backend.c b/patches/ps3recomp-overlay/libs/video/rsx_deko3d_backend.c
+index c6faa22..a2eeb5e 100644
+--- a/patches/ps3recomp-overlay/libs/video/rsx_deko3d_backend.c
++++ b/patches/ps3recomp-overlay/libs/video/rsx_deko3d_backend.c
+@@ -1259,6 +1259,86 @@ static void be_readback(void* user, u32 surface, u32 x, u32 y, u32 w, u32 h,
+     s_spk.readbacks++;
+ }
+ 
++/* ---- white-pattern watch (capture builds only) ----------------------------
++ * Counts the frames that show the white bars of the DU flight blur (see the
++ * GPU idle in be_draw and docs/white-pixels/RESOCONTO.md). Every present of a
++ * capture build reads the presented image back. */
++#define DK_WP_BIG   2000u   /* white runs of a clear pattern                 */
++#define DK_WP_SMALL 1000u   /* a small one: ordinary images stay under 900   */
++static u32 s_wp_blur_4f4a, s_wp_blur_9827;   /* draws of each radial blur */
++static u32 s_wp_frame_blurs;                 /* radial blurs since the last present */
++/* GPU waits of be_draw since the last [wp-wait] line, in every build. */
++static u32 s_wp_wait_copy, s_wp_skip_copy, s_wp_wait_4f4a, s_wp_wait_9827;
++
++/* The pattern repeats every 64 pixels along a row at 1280x720 (blocks or bar
++ * groups), with nothing white half a period away. Counts, on every 4th row,
++ * pure-white pixels whose +64 neighbour is white and +32 neighbour is not.
++ * Checked on recorded frames: pattern 4000..34000, ordinary flight under
++ * 400, the anime movies' white streaks under 900. */
++static u32 dk_wp_count_runs(const u8* rgba, u32 w, u32 h, u32 pitch)
++{
++    u32 n = 0;
++    if (w <= 64u) return 0;
++    for (u32 y = 0; y < h; y += 4u) {
++        const u8* r = rgba + (size_t)y * pitch;
++        for (u32 x = 0; x + 64u < w; x++) {
++            const u8* a = r + x * 4u;
++            const u8* b = a + 64u * 4u;
++            const u8* m = a + 32u * 4u;
++            if (a[0] >= 245 && a[1] >= 245 && a[2] >= 245 &&
++                b[0] >= 245 && b[1] >= 245 && b[2] >= 245 &&
++                !(m[0] >= 245 && m[1] >= 245 && m[2] >= 245))
++                n++;
++        }
++    }
++    return n;
++}
++
++static void dk_wp_watch(void* user, u32 surface)
++{
++    static u32 tick = 0, checks = 0, hits = 0, small = 0, win_checks = 0, win_hits = 0, win_small = 0;
++    static u32 events = 0;
++    static u8* buf = NULL;
++    static size_t cap = 0;
++    if (!dbz3_capture_frame) return;   /* capture builds only */
++    tick++;
++    const u32 frame_blurs = s_wp_frame_blurs;
++    s_wp_frame_blurs = 0;
++    dk_target* t = &s_dk.surfaces[surface];
++    if (!t->used || t->fmt != RSX_BE_FMT_R8G8B8A8 || !t->logical_w || !t->logical_h) return;
++    const u32 w = t->logical_w, h = t->logical_h, pitch = w * 4u;
++    if ((size_t)pitch * h > cap) {
++        u8* n = (u8*)realloc(buf, (size_t)pitch * h);
++        if (!n) return;
++        buf = n;
++        cap = (size_t)pitch * h;
++    }
++    be_readback(user, surface, 0, 0, w, h, buf, pitch);
++    const u32 runs = dk_wp_count_runs(buf, w, h, pitch);
++    checks++;
++    win_checks++;
++    if (runs >= DK_WP_BIG) { hits++; win_hits++; }
++    else if (runs >= DK_WP_SMALL) { small++; win_small++; }
++    /* Every frame with the pattern: when, how large, and what ran before it. */
++    if (runs >= DK_WP_SMALL && events < 300u) {
++        events++;
++        fprintf(stderr, "[wp] event %u present %u at %llu ms: %u white runs, blurs since last present %u,"
++                " blur totals 4f4a %u, 98272 %u\n",
++                events, tick, (unsigned long long)(dk_now_us() / 1000u), runs, frame_blurs,
++                s_wp_blur_4f4a, s_wp_blur_9827);
++        fflush(stderr);
++    }
++    /* About every 30 s (1800 presents at 60 Hz). */
++    if (win_checks >= 1800u) {
++        fprintf(stderr, "[wp] window: %u clear, %u small in %u frames (total %u clear, %u small in %u),"
++                " blur draws 4f4a %u, 98272 %u\n",
++                win_hits, win_small, win_checks, hits, small, checks, s_wp_blur_4f4a, s_wp_blur_9827);
++        fflush(stderr);
++        win_checks = win_hits = win_small = 0;
++        s_wp_blur_4f4a = s_wp_blur_9827 = 0;
++    }
++}
++
+ /* ---- present ------------------------------------------------------------- */
+ 
+ /* DU effect-list guards (postprocess-lift.py): rejects per kind. Weak, so a
+@@ -1474,7 +1554,7 @@ static void dk_draw_debug_menu(const SwitchDebugSettings* settings, u32 fps_x10,
+     labels[DBG_ROW_SCREENSHOT] = "SAVE SCREENSHOT";
+     labels[DBG_ROW_RECORD] = settings->recording ? "STOP SCREEN RECORDING" : "START SCREEN RECORDING";
+     labels[DBG_ROW_DRAW_START] = draw_start; labels[DBG_ROW_DRAW_STEP] = draw_step;
+-    labels[DBG_ROW_DRAW_CAPTURE] = "CAPTURE NEXT DRAW FRAME";
++    labels[DBG_ROW_DRAW_CAPTURE] = "CAPTURE DRAWS IN 5 S (3 FRAMES)";
+     labels[DBG_ROW_REBOOT] = "REBOOT APPLICATION"; labels[DBG_ROW_CLOSE] = "CLOSE MENU";
+     static const char* const group_name[4] = { "DISPLAY", "PERFORMANCE", "CAPTURE", "SYSTEM" };
+     static const int group_first[4] = { DBG_ROW_SCALE, DBG_ROW_FPS, DBG_ROW_SCREENSHOT, DBG_ROW_REBOOT };
+@@ -1573,6 +1653,9 @@ static void be_present(void* user, u32 surface)
+                  s_dk.samp_count, DK_SAMP_SLOTS, (unsigned long long)(free_bytes >> 20),
+                  largest >> 20, s_dk.alloc.count, DK_MAX_EXTENTS,
+                  (unsigned)s_dk.st.tex_made, (unsigned)s_dk.st.tex_fail);
++          dk_err("[wp-wait] last 900 presents: copy %u (skipped %u), blur 4f4a %u, blur 98272 %u\n",
++                 s_wp_wait_copy, s_wp_skip_copy, s_wp_wait_4f4a, s_wp_wait_9827);
++          s_wp_wait_copy = s_wp_skip_copy = s_wp_wait_4f4a = s_wp_wait_9827 = 0;
+       } }
+     const u64 t0 = dk_now_us();
+     const int have_src = surface && surface <= DK_MAX_SURFACES &&
+@@ -1585,6 +1668,7 @@ static void be_present(void* user, u32 surface)
+         s_menu_render_w = s_dk.surfaces[surface].w;
+         s_menu_render_h = s_dk.surfaces[surface].h;
+     }
++    if (have_src) dk_wp_watch(user, surface);
+     if (have_src && dbz3_capture_wants_frame && dbz3_capture_frame &&
+         dbz3_capture_wants_frame(t0)) {
+         dk_target *t = &s_dk.surfaces[surface];
+@@ -1694,6 +1778,19 @@ static void be_present(void* user, u32 surface)
+       }
+       gp_mark(GP_SEG, GP_KEY_OVERLAY);
+       if (settings.show_fps) dk_draw_fps_overlay();
++      { /* Timed draw capture armed from the debug menu: countdown, top left. */
++          const int cd = switch_debug_draw_capture_countdown();
++          if (cd >= 0) {
++              char text[32];
++              const u32 px = s_dk.width >= 1920 ? 4u : 3u;
++              if (cd > 0) snprintf(text, sizeof text, "CAPTURE IN %d", cd);
++              else snprintf(text, sizeof text, "CAPTURE");
++              DkScissor bg = { 12u * px, 12u * px, 56u * px, 8u * px };
++              dkCmdBufSetScissors(s_dk.cmd, 0, &bg, 1);
++              dkCmdBufClearColorFloat(s_dk.cmd, 0, DkColorMask_RGBA, 0.0f, 0.0f, 0.0f, 1.0f);
++              dk_debug_text(bg.x + px, bg.y + px, text, px, 1.0f, 0.3f, 0.2f);
++          }
++      }
+       if (settings.show_frame_ms) {
+           char ms[32];
+           const u32 px = s_dk.width >= 1920 ? 4u : 3u;
+@@ -2553,6 +2650,34 @@ static void be_draw(void* user, rsx_topology topology, const void* vertices,
+     }
+     const dk_target* T = &s_dk.surfaces[rt0];
+ 
++    /* DU flight speed and finishing moves: the full-screen scene copy and the
++     * radial blurs come out with white 4x16 bars in some frames unless the GPU
++     * is idle when they start. Barriers, a tiled cache
++     * flush and invalidating the shader and descriptor caches do not help
++     * (docs/white-pixels/RESOCONTO.md). Here, because a submit recycles the
++     * data ring. The copy runs before the blur of its own frame and also in
++     * duels, where waiting brings green bands: it waits only while the radial
++     * blur has been drawn in the last frames. */
++    { enum { WP_BLUR_RECENT = 16u };   /* presents; flight skips a few blurs */
++      static u32 last_blur;
++      static int blur_seen;
++      if (P->ps_hash == 0x4F4A075BB8184542ull) {
++          s_wp_blur_4f4a++; s_wp_frame_blurs++; s_wp_wait_4f4a++;
++          last_blur = s_present_serial;
++          blur_seen = 1;
++          dk_submit_wait();
++      } else if (P->ps_hash == 0x98272F5DC7F7C421ull) {
++          s_wp_blur_9827++; s_wp_frame_blurs++; s_wp_wait_9827++;
++          dk_submit_wait();
++      } else if (P->ps_hash == 0x43B4C9959FAACEC2ull) {
++          if (blur_seen && s_present_serial - last_blur <= WP_BLUR_RECENT) {
++              s_wp_wait_copy++;
++              dk_submit_wait();
++          } else {
++              s_wp_skip_copy++;
++          }
++      } }
++
+     /* Room for vertices, indices and both constant blocks, in one go: a
+      * submit in between would recycle the ring under the earlier copies. */
+     const u32 vbytes = vertex_count * stride;
+@@ -2866,6 +2991,11 @@ static int dk_init_device(u32 width, u32 height)
+       s_dk.flush_ops = f ? 512u : DK_FLUSH_OPS; if (f) fclose(f); }
+     { FILE* f = fopen("sdmc:/switch/dbz-budokai-3-switch/depth-clamp", "r");
+       s_dk.depth_clamp = f != NULL; if (f) fclose(f); }
++    /* Always logged (dk_err): which SD switches this run read, so an A/B test
++     * can be checked in the light build. */
++    dk_err("sd switches: present-sync %s, texbatch-off %s, flush512 %s, depth-clamp %s\n",
++           s_dk.async_present ? "no" : "YES", s_dk.texbatch_off ? "YES" : "no",
++           s_dk.flush_ops == 512u ? "YES" : "no", s_dk.depth_clamp ? "YES" : "no");
+     dk_log("depth clamp %s\n", s_dk.depth_clamp ? "on" : "off");
+     dk_log("texbatch %s, flush every %u ops\n", s_dk.texbatch_off ? "off" : "on", s_dk.flush_ops);
+     dk_log("present: %s\n", s_dk.async_present && s_dk.set_ring[1]

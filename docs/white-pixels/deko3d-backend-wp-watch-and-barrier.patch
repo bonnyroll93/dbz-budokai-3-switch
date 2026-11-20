@@ -1,0 +1,233 @@
+diff --git a/patches/ps3recomp-overlay/libs/video/rsx_deko3d_backend.c b/patches/ps3recomp-overlay/libs/video/rsx_deko3d_backend.c
+index c6faa22..9f67c6a 100644
+--- a/patches/ps3recomp-overlay/libs/video/rsx_deko3d_backend.c
++++ b/patches/ps3recomp-overlay/libs/video/rsx_deko3d_backend.c
+@@ -275,6 +275,7 @@ static struct {
+     int depth_clamp;               /* sdmc depth-clamp                       */
+     int texbatch_off;              /* sdmc texbatch-off                      */
+     u32 flush_ops;                 /* DK_FLUSH_OPS, or 512 with sdmc flush512 */
++    int barrier_full;              /* sdmc barrier-full: white-pattern test   */
+     DkCmdBuf   cmd;
+     u32 ops;                       /* commands recorded since last submit    */
+     int spare_in_use;
+@@ -1121,6 +1122,9 @@ static void be_depth_target_release(void* user, u32 depth)
+ 
+ static void dk_rebind_targets(void)
+ {
++    /* barrier-full (white-pattern test): every earlier draw finished and every
++     * cache dropped before the targets change. */
++    if (s_dk.barrier_full) dk_full_barrier();
+     DkImageView views[RSX_BE_MAX_COLOR_TARGETS];
+     DkImageView const* ptrs[RSX_BE_MAX_COLOR_TARGETS];
+     u32 n = 0;
+@@ -1259,6 +1263,146 @@ static void be_readback(void* user, u32 surface, u32 x, u32 y, u32 w, u32 h,
+     s_spk.readbacks++;
+ }
+ 
++/* ---- white-pattern watch (capture builds only) ----------------------------
++ * DU flight blur and finishing-move cutscenes show, in a few frames, white
++ * 8x8 blocks (16x16 at 1280x720) in a zig-zag over one triangle of a
++ * full-screen pass. Every 4th present of a capture build reads the presented
++ * image back and counts short runs of pure white; when the pattern is there,
++ * every RGBA8 colour target and every 1280x720 RGBA8 texture is written to
++ * captures/ as it stands at that present, to see which one holds it first. */
++static int dk_wp_write_ppm(const char* path, const u8* rgba, u32 w, u32 h, u32 pitch)
++{
++    FILE* f = fopen(path, "wb");
++    if (!f) return 0;
++    fprintf(f, "P6\n%u %u\n255\n", w, h);
++    u8* row = (u8*)malloc((size_t)w * 3u);
++    if (!row) { fclose(f); return 0; }
++    for (u32 y = 0; y < h; y++) {
++        const u8* s = rgba + (size_t)y * pitch;
++        for (u32 x = 0; x < w; x++) {
++            row[x * 3u + 0u] = s[x * 4u + 0u];
++            row[x * 3u + 1u] = s[x * 4u + 1u];
++            row[x * 3u + 2u] = s[x * 4u + 2u];
++        }
++        fwrite(row, 1, (size_t)w * 3u, f);
++    }
++    free(row);
++    fclose(f);
++    return 1;
++}
++
++/* The whole mip-0 image of a 4-byte linear target or texture, at its physical
++ * size, through the staging block. */
++static int dk_wp_dump_image(dk_target* t, const char* path)
++{
++    if (!t->used || t->bpp != 4u || t->block || !t->w || !t->h) return 0;
++    const u32 row = t->w * 4u;
++    if ((u64)row * t->h > DK_STAGING_SIZE) return 0;
++    DkImageView view;
++    dkImageViewDefaults(&view, &t->image);
++    DkImageRect rect = { 0, 0, 0, t->w, t->h, 1 };
++    DkCopyBuf dst = { dkMemBlockGetGpuAddr(s_dk.mem_staging), 0, 0 };
++    dk_full_barrier();
++    dkCmdBufCopyImageToBuffer(s_dk.cmd, &view, &rect, &dst, 0);
++    dk_full_barrier();
++    dk_submit_wait();
++    dkMemBlockFlushCpuCache(s_dk.mem_staging, 0, row * t->h);
++    return dk_wp_write_ppm(path, (const u8*)dkMemBlockGetCpuAddr(s_dk.mem_staging),
++                           t->w, t->h, row);
++}
++
++/* The pattern repeats every 64 pixels along a row at 1280x720 (blocks or bar
++ * groups), with nothing white half a period away. Counts, on every 4th row,
++ * pure-white pixels whose +64 neighbour is white and +32 neighbour is not.
++ * Checked on recorded frames: pattern 4000..34000, ordinary flight under
++ * 400, the anime movies' white streaks under 900. */
++static u32 dk_wp_count_runs(const u8* rgba, u32 w, u32 h, u32 pitch)
++{
++    u32 n = 0;
++    if (w <= 64u) return 0;
++    for (u32 y = 0; y < h; y += 4u) {
++        const u8* r = rgba + (size_t)y * pitch;
++        for (u32 x = 0; x + 64u < w; x++) {
++            const u8* a = r + x * 4u;
++            const u8* b = a + 64u * 4u;
++            const u8* m = a + 32u * 4u;
++            if (a[0] >= 245 && a[1] >= 245 && a[2] >= 245 &&
++                b[0] >= 245 && b[1] >= 245 && b[2] >= 245 &&
++                !(m[0] >= 245 && m[1] >= 245 && m[2] >= 245))
++                n++;
++        }
++    }
++    return n;
++}
++
++static void dk_wp_watch(void* user, u32 surface)
++{
++    static u32 tick = 0, dumps = 0, checks = 0, hits = 0, win_checks = 0, win_hits = 0;
++    static u8* buf = NULL;
++    static size_t cap = 0;
++    if (!dbz3_capture_frame) return;   /* capture builds only */
++    if (++tick % 4u) return;
++    dk_target* t = &s_dk.surfaces[surface];
++    if (!t->used || t->fmt != RSX_BE_FMT_R8G8B8A8 || !t->logical_w || !t->logical_h) return;
++    const u32 w = t->logical_w, h = t->logical_h, pitch = w * 4u;
++    if ((size_t)pitch * h > cap) {
++        u8* n = (u8*)realloc(buf, (size_t)pitch * h);
++        if (!n) return;
++        buf = n;
++        cap = (size_t)pitch * h;
++    }
++    be_readback(user, surface, 0, 0, w, h, buf, pitch);
++    const u32 runs = dk_wp_count_runs(buf, w, h, pitch);
++    if (++checks <= 3u)
++        fprintf(stderr, "[wp] check %u: presented surface %u %ux%u, %u white runs\n",
++                checks, surface, w, h, runs);
++    const int hit = runs >= 2000u;
++    win_checks++;
++    if (hit) { hits++; win_hits++; }
++    /* About every 30 s (450 checks x 4 presents at 60 Hz): how many checked
++     * frames showed the pattern, in this window and since start. */
++    if (win_checks >= 450u) {
++        fprintf(stderr, "[wp] window: %u/%u checked frames with the pattern (total %u/%u)%s\n",
++                win_hits, win_checks, hits, checks,
++                s_dk.barrier_full ? " [barrier-full]" : "");
++        fflush(stderr);
++        win_checks = win_hits = 0;
++    }
++    /* Dumps off for the barrier A/B test (run200 already has two sets). */
++    if (!hit || dumps >= 0u) return;
++    const u32 n = ++dumps;
++    char path[192];
++    mkdir("sdmc:/switch/dbz-budokai-3-switch/captures", 0777);
++    fprintf(stderr, "[wp] pattern #%u at watched present %u: surface %u, %u white runs; dumping\n",
++            n, tick, surface, runs);
++    fflush(stderr);
++    snprintf(path, sizeof path, "sdmc:/switch/dbz-budokai-3-switch/captures/wp%u_final_s%u.ppm",
++             n, surface);
++    dk_wp_write_ppm(path, buf, w, h, pitch);
++    for (u32 i = 1; i <= DK_MAX_SURFACES; i++) {
++        dk_target* s = &s_dk.surfaces[i];
++        if (!s->used || s->fmt != RSX_BE_FMT_R8G8B8A8) continue;
++        snprintf(path, sizeof path,
++                 "sdmc:/switch/dbz-budokai-3-switch/captures/wp%u_surf%02u_%ux%u.ppm",
++                 n, i, s->logical_w, s->logical_h);
++        const int ok = dk_wp_dump_image(s, path);
++        fprintf(stderr, "[wp]   surface %u %ux%u (physical %ux%u) mem 0x%X%s\n", i,
++                s->logical_w, s->logical_h, s->w, s->h, s->mem_off, ok ? "" : " not written");
++        fflush(stderr);
++    }
++    for (u32 i = 0; i < DK_MAX_TEXTURES; i++) {
++        dk_target* s = &s_dk.textures[i];
++        if (!s->used || s->w != 1280u || s->h != 720u) continue;
++        snprintf(path, sizeof path,
++                 "sdmc:/switch/dbz-budokai-3-switch/captures/wp%u_tex%04u_%ux%u.ppm",
++                 n, DK_TEX_BASE + i, s->w, s->h);
++        const int ok = dk_wp_dump_image(s, path);
++        fprintf(stderr, "[wp]   texture %u %ux%u fmt %d mem 0x%X%s\n", DK_TEX_BASE + i,
++                s->w, s->h, (int)s->fmt, s->mem_off, ok ? "" : " not written");
++        fflush(stderr);
++    }
++}
++
+ /* ---- present ------------------------------------------------------------- */
+ 
+ /* DU effect-list guards (postprocess-lift.py): rejects per kind. Weak, so a
+@@ -1474,7 +1618,7 @@ static void dk_draw_debug_menu(const SwitchDebugSettings* settings, u32 fps_x10,
+     labels[DBG_ROW_SCREENSHOT] = "SAVE SCREENSHOT";
+     labels[DBG_ROW_RECORD] = settings->recording ? "STOP SCREEN RECORDING" : "START SCREEN RECORDING";
+     labels[DBG_ROW_DRAW_START] = draw_start; labels[DBG_ROW_DRAW_STEP] = draw_step;
+-    labels[DBG_ROW_DRAW_CAPTURE] = "CAPTURE NEXT DRAW FRAME";
++    labels[DBG_ROW_DRAW_CAPTURE] = "CAPTURE DRAWS IN 5 S (3 FRAMES)";
+     labels[DBG_ROW_REBOOT] = "REBOOT APPLICATION"; labels[DBG_ROW_CLOSE] = "CLOSE MENU";
+     static const char* const group_name[4] = { "DISPLAY", "PERFORMANCE", "CAPTURE", "SYSTEM" };
+     static const int group_first[4] = { DBG_ROW_SCALE, DBG_ROW_FPS, DBG_ROW_SCREENSHOT, DBG_ROW_REBOOT };
+@@ -1585,6 +1729,7 @@ static void be_present(void* user, u32 surface)
+         s_menu_render_w = s_dk.surfaces[surface].w;
+         s_menu_render_h = s_dk.surfaces[surface].h;
+     }
++    if (have_src) dk_wp_watch(user, surface);
+     if (have_src && dbz3_capture_wants_frame && dbz3_capture_frame &&
+         dbz3_capture_wants_frame(t0)) {
+         dk_target *t = &s_dk.surfaces[surface];
+@@ -1694,6 +1839,19 @@ static void be_present(void* user, u32 surface)
+       }
+       gp_mark(GP_SEG, GP_KEY_OVERLAY);
+       if (settings.show_fps) dk_draw_fps_overlay();
++      { /* Timed draw capture armed from the debug menu: countdown, top left. */
++          const int cd = switch_debug_draw_capture_countdown();
++          if (cd >= 0) {
++              char text[32];
++              const u32 px = s_dk.width >= 1920 ? 4u : 3u;
++              if (cd > 0) snprintf(text, sizeof text, "CAPTURE IN %d", cd);
++              else snprintf(text, sizeof text, "CAPTURE");
++              DkScissor bg = { 12u * px, 12u * px, 56u * px, 8u * px };
++              dkCmdBufSetScissors(s_dk.cmd, 0, &bg, 1);
++              dkCmdBufClearColorFloat(s_dk.cmd, 0, DkColorMask_RGBA, 0.0f, 0.0f, 0.0f, 1.0f);
++              dk_debug_text(bg.x + px, bg.y + px, text, px, 1.0f, 0.3f, 0.2f);
++          }
++      }
+       if (settings.show_frame_ms) {
+           char ms[32];
+           const u32 px = s_dk.width >= 1920 ? 4u : 3u;
+@@ -2603,7 +2761,9 @@ static void be_draw(void* user, rsx_topology topology, const void* vertices,
+         samples_target |= is_surface;
+         th[u] = dkMakeTextureHandle(img, smp);
+     }
+-    if (samples_target)
++    if (samples_target && s_dk.barrier_full)
++        dk_full_barrier();
++    else if (samples_target)
+         dkCmdBufBarrier(s_dk.cmd, DkBarrier_Fragments, DkInvalidateFlags_Image);
+ #ifdef DBZ3_DEKO_DIAG
+     { static u32 n = 0;   /* T23: which textures the model draws sample */
+@@ -2866,6 +3026,15 @@ static int dk_init_device(u32 width, u32 height)
+       s_dk.flush_ops = f ? 512u : DK_FLUSH_OPS; if (f) fclose(f); }
+     { FILE* f = fopen("sdmc:/switch/dbz-budokai-3-switch/depth-clamp", "r");
+       s_dk.depth_clamp = f != NULL; if (f) fclose(f); }
++    { FILE* f = fopen("sdmc:/switch/dbz-budokai-3-switch/barrier-full", "r");
++      s_dk.barrier_full = f != NULL; if (f) fclose(f); }
++    /* Always logged (dk_err): which SD switches this run read, so an A/B test
++     * can be checked in the light build. */
++    dk_err("sd switches: present-sync %s, texbatch-off %s, flush512 %s, depth-clamp %s,"
++           " barrier-full %s\n",
++           s_dk.async_present ? "no" : "YES", s_dk.texbatch_off ? "YES" : "no",
++           s_dk.flush_ops == 512u ? "YES" : "no", s_dk.depth_clamp ? "YES" : "no",
++           s_dk.barrier_full ? "YES" : "no");
+     dk_log("depth clamp %s\n", s_dk.depth_clamp ? "on" : "off");
+     dk_log("texbatch %s, flush every %u ops\n", s_dk.texbatch_off ? "off" : "on", s_dk.flush_ops);
+     dk_log("present: %s\n", s_dk.async_present && s_dk.set_ring[1]

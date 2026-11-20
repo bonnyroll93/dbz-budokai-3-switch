@@ -1,0 +1,139 @@
+diff --git a/patches/ps3recomp-overlay/libs/video/rsx_draw_engine.c b/patches/ps3recomp-overlay/libs/video/rsx_draw_engine.c
+index 59aadfa..487b109 100644
+--- a/patches/ps3recomp-overlay/libs/video/rsx_draw_engine.c
++++ b/patches/ps3recomp-overlay/libs/video/rsx_draw_engine.c
+@@ -2454,6 +2454,10 @@ static void eng_vc_store(u64 key)
+     s_vc_stores++;
+ }
+ 
++/* Set by dc_fetch_cached: 1 when the last draw's vertices came from the
++ * vertex cache (white-pattern investigation, sink_check_fullscreen_uv). */
++static int s_vc_last_hit;
++
+ static void dc_set_own_views(void)
+ {
+     dc.verts_view = dc.verts;
+@@ -2465,12 +2469,14 @@ static void dc_fetch_cached(const rsx_vertex_layout_plan* layout, int allow_rema
+ {
+     if (s_vc_enabled < 0) s_vc_enabled = getenv("RSX_NO_VCACHE") ? 0 : 1;
+     s_vc_tick++;
++    s_vc_last_hit = 0;
+     FSUB_T0();
+     const u64 key = s_vc_enabled ? eng_vc_key(layout, allow_remap) : 0;
+     FSUB(0);
+     if (key) {
+         eng_vc_entry* e = eng_vc_find(key);
+         if (e) {
++            s_vc_last_hit = 1;
+             e->last_use = s_vc_tick;
+             dc.layout = *layout;
+             dc.fetch_ok = 1;
+@@ -2502,6 +2508,100 @@ static void dc_fetch_cached(const rsx_vertex_layout_plan* layout, int allow_rema
+     FSUB(5);
+ }
+ 
++/* White-pattern investigation (DU flight blur, finishing-move cutscenes):
++ * one triangle of a full-screen pass samples with texture coordinates far
++ * outside 0..1 in a few frames. For a 4-vertex draw whose positions sit on the
++ * clip-space corners, check TEXCOORD0 (attribute 8) and log where the
++ * vertices came from when one is out of range. Always on, at most 30 logs. */
++static void sink_check_fullscreen_uv(const rsx_vertex_layout_plan* layout,
++                                     u32 target, u32 tex_mask, const u32* textures,
++                                     u32 prim, u32 n_draw)
++{
++    static u32 logs = 0, seen = 0;
++    if (dc.n_verts < 3u || dc.n_verts > 4u || layout->count > RSX_DSP_NUM_VERTEX_ATTR) return;
++    int s0 = -1, s8 = -1;
++    for (u32 sl = 0; sl < layout->count; sl++) {
++        if (layout->attrs[sl] == 0u) s0 = (int)sl;
++        if (layout->attrs[sl] == 8u) s8 = (int)sl;
++    }
++    if (s0 < 0 || s8 < 0) return;
++    u32 corners = 0, bad = 0;
++    for (u32 v = 0; v < dc.n_verts; v++) {
++        const float* p = (const float*)(dc.verts_view + (size_t)v * layout->stride + (u32)s0 * 16u);
++        const float* t = (const float*)(dc.verts_view + (size_t)v * layout->stride + (u32)s8 * 16u);
++        const float ax = p[0] < 0 ? -p[0] : p[0], ay = p[1] < 0 ? -p[1] : p[1];
++        if (ax > 0.999f && ax < 1.001f && ay > 0.999f && ay < 1.001f) corners++;
++        if (!(t[0] >= -0.01f && t[0] <= 1.01f && t[1] >= -0.01f && t[1] <= 1.01f)) bad |= 1u << v;
++    }
++    /* Only draws whose every vertex sits on a clip-space corner: a full-screen
++     * quad, or one half of it. A clean one is 4 vertices, 6 indices, one
++     * packet. */
++    if (corners < 3u || corners != dc.n_verts) return;
++    const int split = dc.n_verts != 4u || n_draw != 6u || dc.n_packets != 1u;
++    if (!bad && !split) {
++        /* Proof the check runs: the first few clean full-screen draws. */
++        static u32 ok_logs = 0;
++        if (ok_logs < 3u) {
++            ok_logs++;
++            fprintf(stderr, "[fs-uv] ok full-screen draw fp %08X target %08X vcache_hit %d inline_bytes %u\n",
++                    s_cur_fp ? s_cur_fp->off : 0, g.surfaces[target].offset,
++                    s_vc_last_hit, dc.inl_bytes);
++        }
++        return;
++    }
++    seen++;
++    if (logs >= 30u) return;
++    logs++;
++    const eng_surface* ts = &g.surfaces[target];
++    fprintf(stderr, "[fs-uv] #%u bad=%X corners=%u verts %u prim %u indices %u packets %u"
++            " target %u:%08X %ux%u fp %08X/%016llX"
++            " vcache_hit %d inline_bytes %u n_arr %u n_idx %u refs %u remap %d texmask %X t0 %u t1 %u\n",
++            seen, bad, corners, dc.n_verts, prim, n_draw, dc.n_packets,
++            ts->location, ts->offset, ts->w, ts->h,
++            s_cur_fp ? s_cur_fp->off : 0,
++            (unsigned long long)(s_cur_fp ? s_cur_fp->shash : 0),
++            s_vc_last_hit, dc.inl_bytes, dc.n_arr, dc.n_idx, dc.n_source_refs,
++            dc.refs_remapped, tex_mask, textures[0], textures[1]);
++    for (u32 b = 0; b < dc.n_arr && b < 4u; b++)
++        fprintf(stderr, "[fs-uv]   array %u first %u count %u\n", b, dc.arr[b].first, dc.arr[b].count);
++    for (u32 b = 0; b < dc.n_idx && b < 4u; b++)
++        fprintf(stderr, "[fs-uv]   index run %u first %u count %u\n", b, dc.idx[b].first, dc.idx[b].count);
++    for (u32 v = 0; v < dc.n_verts; v++) {
++        const float* p = (const float*)(dc.verts_view + (size_t)v * layout->stride + (u32)s0 * 16u);
++        const float* t = (const float*)(dc.verts_view + (size_t)v * layout->stride + (u32)s8 * 16u);
++        fprintf(stderr, "[fs-uv]   v%u pos %.4g %.4g %.4g %.4g uv %.6g %.6g %.6g %.6g"
++                " (uv bits %08X %08X)\n", v, p[0], p[1], p[2], p[3], t[0], t[1], t[2], t[3],
++                ((const u32*)t)[0], ((const u32*)t)[1]);
++    }
++    /* What guest memory holds now for each attribute of each vertex. With
++     * draw arrays the vertices are first..first+3 of the first range; with an
++     * inline stream the raw words are the stream itself. */
++    const u32 base_off = rsx_dsp_vertex_data_base_offset(&g.rsx);
++    for (u32 sl = 0; sl < layout->count; sl++) {
++        rsx_dsp_vertex_attr d;
++        rsx_dsp_get_vertex_attr(&g.rsx, layout->attrs[sl], &d);
++        fprintf(stderr, "[fs-uv]   a%u type %u size %u stride %u off 0x%08X loc %u freq %u\n",
++                layout->attrs[sl], d.type, d.size, d.stride, d.offset, d.location, d.frequency);
++        if (dc.inl_bytes || !dc.n_arr || !d.type || !d.size) continue;
++        const u32 elem = rsx_vertex_attrib_size(d.type, d.size);
++        const u32 stride = d.stride ? d.stride : elem;
++        for (u32 v = 0; v < dc.n_verts && elem && elem <= 16u; v++) {
++            const u32 off = base_off + d.offset + (dc.arr[0].first + v) * stride;
++            const u8* m = eng_guest_ptr(NULL, d.location, off, elem);
++            if (!m) continue;
++            char hex[40]; u32 at = 0;
++            for (u32 i = 0; i < elem; i++) at += (u32)snprintf(hex + at, sizeof hex - at, "%02X", m[i]);
++            fprintf(stderr, "[fs-uv]     guest v%u @%u:%08X %s\n", v, d.location, off, hex);
++        }
++    }
++    if (dc.inl_bytes && dc.inl) {
++        char hex[2 * 160 + 1]; u32 at = 0;
++        for (u32 i = 0; i < dc.inl_bytes && i < 160u; i++)
++            at += (u32)snprintf(hex + at, sizeof hex - at, "%02X", dc.inl[i]);
++        fprintf(stderr, "[fs-uv]   inline %s\n", hex);
++    }
++}
++
+ /* ---- sink ---------------------------------------------------------------- */
+ 
+ static void sink_begin(void* user, const rsx_dispatch* r, u32 prim)
+@@ -3617,6 +3717,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
+     const u32 vtex_mask = sink_bind_vertex_textures(eng_vtex_mask(), vtextures,
+                                                     vsamplers);
+     ENG_SEC(3);
++    sink_check_fullscreen_uv(&layout, target, tex_mask, textures, prim, n_draw);
+ 
+     if (indexed) {
+         if (!dc_reserve_indices(n_draw)) return;
