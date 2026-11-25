@@ -14,6 +14,7 @@ Indagine svolta dal 2026-11-17 al 2026-11-19, sessioni da run194 a run223. Lo st
 - Una barriera GPU completa e lo svuotamento della cache a tile **non** bastano.
 - Anche invalidare le cache di shader/costanti e dei descrittori **non** basta (run215).
 - Attendere la GPU solo prima del blur riduce il difetto di circa 5 volte, ma non lo elimina (run214).
+- **2026-11-25, senza Logic60:** anche l'attesa prima di ogni lettura di superficie riduce soltanto il difetto, e le fasce verdi tornano. Le attese GPU sono escluse come correzione (vedi [Prova del 2026-11-25](#prova-del-2026-11-25-attese-gpu-senza-logic60)).
 
 ## Il difetto
 
@@ -211,6 +212,23 @@ Il 2026-11-19 si è deciso di sospendere la correzione.
 3. Se le fasce restano, capire quale altra attesa scatta nei duelli. Se spariscono, controllare che i pixel bianchi non tornino nelle mosse finali.
 
 La causa profonda nella GPU resta da spiegare.
+
+### Prova del 2026-11-25: attese GPU senza Logic60
+
+Dopo la rimozione di Logic60 (commit `4232850`) le attese sono state riprovate con una riga del menu debug, GPU WAIT, non salvata e quindi su OFF a ogni avvio:
+
+| Modalità | Cosa faceva |
+|---|---|
+| OFF | nessuna attesa |
+| BLUR ONLY | attesa prima del blur `ps_4f4a075bb8184542` e prima della copia `ps_43b4c9959faacec2` se quel blur era stato disegnato negli ultimi 16 frame; nessuna attesa prima di `ps_98272f5dc7f7c421` |
+| ALL | invio dei comandi e attesa della GPU prima di ogni draw che legge una superficie, come `wp-submit-wait` |
+
+Build `dbz3-gpuwait.nsp` (crash-trail). Esito riferito dall'utente, senza log scaricati:
+
+- **Anche con l'attesa totale (ALL) i pixel bianchi si riducono ma non spariscono.**
+- **Tornano le fasce verdi.**
+
+La correzione è stata bocciata e il codice revertito; non è mai stato committato. Le attese GPU sono quindi escluse come correzione, anche senza Logic60. Il punto 1 della lista sopra non va più seguito: la causa va cercata altrove.
 
 ## Interruttori del build `dbz3-wpfix2`
 
