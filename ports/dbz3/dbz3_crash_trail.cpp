@@ -33,15 +33,14 @@ extern "C" uint32_t ppu_main_lr(void);
 extern "C" void ppu_dump_all_thread_stacks(FILE* out);
 extern "C" void spu_taskset_diag_snapshot(FILE* out);
 extern "C" uint32_t g_dbz3_cur_task_fn;
-/* dbz3_loop_prof.cpp with Logic60: passes, steps, gated, aborted, dropped_us. */
-extern "C" void dbz3_logic60_counters(uint64_t out[5]) __attribute__((weak));
+extern "C" int cellGcm_user_cmd_snapshot(char* buf, size_t n) __attribute__((weak));
 
 namespace {
 
 constexpr const char* kDir = "sdmc:/switch/dbz-budokai-3-switch";
 constexpr int kKeepFiles = 10;
 constexpr int kEvents = 32;
-constexpr int kEventLen = 192;
+constexpr int kEventLen = 512;   /* fits a cellGcm_user_cmd_snapshot line */
 constexpr int kMaxFns = 64;
 constexpr int kHeartbeatS = 5;
 constexpr int kStallS = 10;
@@ -97,7 +96,7 @@ void writer(void*)
         svcSleepThread(1000000000ull);
         bool wrote = false;
 
-        char events[kEvents][kEventLen];
+        static char events[kEvents][kEventLen];   /* this thread only; 16 KB off its stack */
         int count = 0, lost = 0;
         uint32_t fns[kMaxFns];
         int fn_count = 0;
@@ -151,6 +150,12 @@ void writer(void*)
             snprintf(line, sizeof line, "STALL: no image for %d s (flips=%u); thread dump follows",
                      no_flip_s, flips);
             write_line(line);
+            {   /* the user-command path: why the end-of-frame wait is not released */
+                char snap[512];
+                snap[0] = 0;
+                if (cellGcm_user_cmd_snapshot) cellGcm_user_cmd_snapshot(snap, sizeof snap);
+                write_line(snap);
+            }
             mutexLock(&g_file_lock);
             if (g_file) {
                 ppu_dump_all_thread_stacks(g_file);
@@ -168,22 +173,7 @@ void writer(void*)
                      "hb flips=%u fps=%.1f task=%06X lr=%08X heap_used_mb=%.1f",
                      flips, (double)(flips - window_flips) / since_heartbeat,
                      g_dbz3_cur_task_fn, ppu_main_lr(), mi.uordblks / 1048576.0);
-            /* Logic60 over the window: logic steps per second (60 = real
-             * time), passes per second, passes whose extra steps a load held
-             * back, extra steps cut short by a load, owed time thrown away. */
-            static uint64_t l60_prev[5];
-            if (dbz3_logic60_counters && n > 0 && n < (int)sizeof line) {
-                uint64_t c[5];
-                dbz3_logic60_counters(c);
-                snprintf(line + n, sizeof line - (size_t)n,
-                         " l60 steps_s=%.1f passes_s=%.1f gated=%llu aborted=%llu dropped_ms=%llu",
-                         (double)(c[1] - l60_prev[1]) / since_heartbeat,
-                         (double)(c[0] - l60_prev[0]) / since_heartbeat,
-                         (unsigned long long)(c[2] - l60_prev[2]),
-                         (unsigned long long)(c[3] - l60_prev[3]),
-                         (unsigned long long)((c[4] - l60_prev[4]) / 1000u));
-                memcpy(l60_prev, c, sizeof c);
-            }
+            (void)n;
             write_line(line);
             window_flips = flips;
             since_heartbeat = 0;

@@ -523,9 +523,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
         endif()
         target_link_options(${PROJECT_NAME} PRIVATE "LINKER:--wrap=_Z13func_001FCAC4P11ppu_context")
         message(STATUS "DBZ3 gcm-const fast path: ON")
-        # The loop wrappers also drive 60 Hz gameplay. Timing and log output are
-        # controlled separately by PORT_DBZ3_LOOP_METRICS.
-        option(PORT_DBZ3_LOOP_PROF "Enable DBZ3 loop wrappers for 60 Hz gameplay" ON)
+        # The loop wrappers also hold the frame cap (debug menu FRAME CAP).
+        # Timing and log output are controlled separately by PORT_DBZ3_LOOP_METRICS.
+        option(PORT_DBZ3_LOOP_PROF "Enable DBZ3 loop wrappers (frame cap)" ON)
         if(PORT_DBZ3_LOOP_PROF)
             option(PORT_DBZ3_LEVEL_FUNCTION_PROFILE "Time func_00030790 during the level task" OFF)
             if(PORT_DBZ3_LEVEL_FUNCTION_PROFILE)
@@ -551,10 +551,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
                     COMPILE_OPTIONS "-w;-ffp-contract=off")
                 set_property(SOURCE dbz3_loop_prof.cpp APPEND PROPERTY
                     COMPILE_DEFINITIONS PORT_DBZ3_HEAP_TRACE=1)
-                if(PORT_DBZ3_LOGIC60)
-                    set_property(SOURCE dbz3_heap_trace.cpp APPEND PROPERTY
-                        COMPILE_DEFINITIONS PORT_DBZ3_LOGIC60=1)
-                endif()
             endif()
             foreach(_fn 0004883C 00048088 0002E958 0001176C 0001C000 00015B10
                         0001573C 0001F318 00024588 00015EA8 0001745C 00028FD8
@@ -563,14 +559,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
                     "LINKER:--wrap=_Z13func_${_fn}P11ppu_context")
             endforeach()
             message(STATUS "DBZ3 main loop profile: ON")
-            # T6.2: extra logic-only task passes so the game runs at 60 logic
-            # steps/s whatever the drawn frame rate (dbz3_loop_prof.cpp).
-            option(PORT_DBZ3_LOGIC60 "DBZ3 logic at 60 steps/s" ON)
-            if(PORT_DBZ3_LOGIC60)
-                set_property(SOURCE dbz3_loop_prof.cpp APPEND PROPERTY
-                    COMPILE_DEFINITIONS PORT_DBZ3_LOGIC60=1)
-                message(STATUS "DBZ3 logic at 60 Hz: ON")
-            endif()
         endif()
     endif()
     # T33: the DBZ3 bnusCore audio SPU at the lowest host priority. It burns a

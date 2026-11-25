@@ -100,77 +100,34 @@ extern "C" void dbz3_heap_trace_dump(FILE* f, uint32_t addr)
 }
 
 /*
- * run30: the logic60 corruption is an overflow of the a2d (2D renderer)
- * tables allocated in a2d.cpp:410-420 (init func_00055C48), e.g. the
- * 512 x 8-byte table of line 414 (0x484804, count 0x484800): entries are
- * added without a capacity check and cleared by the 2D draw side once per
- * drawn frame (func_000558F8), so with 2 logic steps per image it filled up
- * past its end into the next heap block. Give these tables 4x the room.
+ * run30/run31 (Logic60, removed 2026-11-25): with 2 logic steps per image the
+ * a2d (2D renderer) tables of a2d.cpp:410-420 overflowed and its state stacks
+ * underflowed, because the draw side resets them once per drawn frame
+ * (func_000558F8). The table growth and the empty-pop guard went with
+ * Logic60: with one logic step per image, as on PS3, neither can happen.
  */
-constexpr uint32_t kA2dGrow = 4;
-
-int is_a2d_table(uint32_t file, uint32_t line)
-{
-    if (line < 400u || line > 430u) return 0;
-    char s[64];
-    guest_str(file, s, sizeof s);
-    const size_t n = strlen(s);
-    return n >= 7 && strcmp(s + n - 7, "a2d.cpp") == 0;
-}
-
-std::atomic<uint32_t> g_a2d_grown{0};
-
 void func_0001D294(ppu_context* ctx)
 {
     const uint32_t lr = (uint32_t)ctx->lr;
     const uint32_t file = (uint32_t)ctx->gpr[5];
     const uint32_t line = (uint32_t)ctx->gpr[6];
-#ifdef PORT_DBZ3_LOGIC60
-    if (is_a2d_table(file, line)) {
-        const uint32_t size = (uint32_t)ctx->gpr[3];
-        ctx->gpr[3] = (uint64_t)(size * kA2dGrow);
-        if (g_a2d_grown.fetch_add(1) < 16)
-            fprintf(stderr, "[t62] a2d.cpp:%u table 0x%X -> 0x%X bytes\n", line, size, size * kA2dGrow);
-    }
-#endif
     lifted_0001D294(ctx);
     push(1, (uint32_t)ctx->gpr[3], lr, file, line);
 }
 
 /*
- * run31: growing the tables only moved the damage to the new end of the
- * line-414 table, i.e. just below the next table: the a2d state stacks
- * underflow. Pops (lifted bodies, no empty check):
+ * a2d state stack pops, as the lifted bodies do them (no empty check):
  *   func_000595F0  count *(0x484818) -= 1, top *(0x484810) -= 80   (base *(0x484808))
  *   func_000595CC  count *(0x48481C) -= 1, top *(0x484814) -= 4    (base *(0x48480C))
- * The draw side resets both stacks once per drawn frame (func_000558F8:
- * count = 0, top = base, default state at base[0]); with 2 logic steps per
- * image some pop runs on an empty stack, the top goes below base and the next
- * push writes 80-byte states (colour 1.0f...) over the previous heap block.
- * Here a pop on an empty stack leaves it at base (the default state).
  */
-std::atomic<uint32_t> g_a2d_pop_guard[2];
-
 static void a2d_pop(ppu_context* ctx, uint32_t count_ea, uint32_t top_ea, uint32_t base_ea,
                     uint32_t step, int which)
 {
+    (void)base_ea; (void)which;
     int32_t count = (int32_t)vm_read32(count_ea);
     uint32_t top = vm_read32(top_ea);
-    const uint32_t base = vm_read32(base_ea);
-#ifdef PORT_DBZ3_LOGIC60
-    if (count <= 0 || top < base + step) {
-        const uint32_t n = g_a2d_pop_guard[which].fetch_add(1);
-        if (n < 8 || (n & 1023u) == 0)
-            fprintf(stderr, "[t62] a2d pop on empty stack %d (count=%d top=0x%08X base=0x%08X) x%u\n",
-                    which, count, top, base, n + 1);
-        count = 0;
-        top = base;
-    } else
-#endif
-    {
-        count -= 1;
-        top -= step;
-    }
+    count -= 1;
+    top -= step;
     vm_write32(count_ea, (uint32_t)count);
     vm_write32(top_ea, top);
     /* Same volatile registers as the lifted body leaves. */

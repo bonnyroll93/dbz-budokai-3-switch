@@ -1953,6 +1953,37 @@ extern "C" uint64_t g_fw_waits, g_fw_wait_ticks, g_fw_fifo_ticks, g_fw_deliver_t
     g_fw_max_ticks;   // defined in dbz3_loop_prof.cpp
 static int s_fw_mode;   // 0 undecided, 1 delivering loop, -1 lifted
 
+/* Frozen-picture rescue (run179, run204, run232: main parked here for good).
+ * After each second without the flag: log the user-command path state to
+ * stderr and the crash trail, and if the FIFO walker has consumed everything
+ * up to `put` with nothing pending -- the RSX is idle, so the command this
+ * wait is for was lost -- queue the title's per-frame command (0xF5AAC0DE,
+ * written by func_0004948C) once more; the next pump delivers it.
+ * SD switch usercmd-rescue-off: log only. */
+extern "C" int cellGcm_user_cmd_snapshot(char* buf, size_t n);
+extern "C" int cellGcm_user_cmd_rescue(uint32_t cmd);
+extern "C" void dbz3_trail_event(const char* fmt, ...) __attribute__((weak));
+static const uint64_t kFwRescueTicks = 19200000ull;   // 1 s at 19.2 MHz
+static void fw_stuck_report(uint32_t obj, uint64_t t0)
+{
+    static int rescue_off = -1;
+    static unsigned reports = 0, rescues = 0;
+    if (rescue_off < 0) rescue_off = sd_flag("usercmd-rescue-off") ? 1 : 0;
+    char snap[512];
+    cellGcm_user_cmd_snapshot(snap, sizeof snap);
+    const int rescued = rescue_off ? 0 : cellGcm_user_cmd_rescue(0xF5AAC0DEu);
+    if (rescued) rescues++;
+    const unsigned ms = (unsigned)((armGetSystemTick() - t0) / 19200ull);
+    if (reports++ < 64 || rescued) {
+        fprintf(stderr, "[fw-stuck] frame wait %u ms, flag obj 0x%08X+0x2C=0, %s; rescue %s (#%u)\n",
+                ms, obj, snap, rescued ? "QUEUED" : (rescue_off ? "off" : "declined"), rescues);
+        fflush(stderr);
+        if (dbz3_trail_event)
+            dbz3_trail_event("fw-stuck %u ms: %s; rescue %s (#%u)", ms, snap,
+                             rescued ? "QUEUED" : (rescue_off ? "off" : "declined"), rescues);
+    }
+}
+
 void func_002909C0(ppu_context* ctx)
 {
     DBZ3_NATIVE_STAMP(ctx, 0x002909C0u);
@@ -1970,6 +2001,7 @@ void func_002909C0(ppu_context* ctx)
     if (s_fw_mode < 0) {
         func_002909C0_lifted(ctx);
     } else {
+        uint64_t next_check = t0 + kFwRescueTicks;
         for (;;) {
             if (ppu_gcm_pump) ppu_gcm_pump();
             if ((f = r32(obj + 0x2Cu)) != 0) break;
@@ -1977,6 +2009,10 @@ void func_002909C0(ppu_context* ctx)
             ctx->gpr[3] = 0x1E;
             lv2_syscall(ctx);
             if ((f = r32(obj + 0x2Cu)) != 0) break;
+            if (armGetSystemTick() >= next_check) {
+                next_check += kFwRescueTicks;
+                fw_stuck_report(obj, t0);
+            }
         }
         ctx->gpr[3] = f;
     }

@@ -7,9 +7,8 @@ Budokai HD Collection and the official PS3 firmware yourself. The game and
 Dragon Ball trademarks belong to their respective owners. The MIT license
 applies to this project's own code; dependencies retain their own licenses.
 
-**Current version: 0.1.0** (see [Changelog](#changelog)). This port is
-experimental. Switch rendering and combat performance are still being tested;
-no game assets or installable packages are distributed here.
+This port is experimental. Switch rendering and combat performance are still
+being tested; no game assets or installable packages are distributed here.
 
 ## Project status
 
@@ -76,55 +75,55 @@ The full history is in [ROADto60fps.md](ROADto60fps.md).
 Not measured again since the 60 FPS work: the DU map and the experience/level
 screen after a DU fight (both ~30 FPS or lower at the start).
 
+### Fixed recently
+
+- **Dragon Universe, UI drawn twice.** On the map the Dragon Ball bar (Triangle)
+  flickered as if a second bar, offset to the right, appeared for one image;
+  at FRAME CAP 30 it stayed on screen. The ghost showed in the image after
+  every scheduler pass that ran more than one logic step (run157). Task
+  `0x001D16C8` writes no GCM commands, so Logic60 ran it again in the extra
+  steps, but it queues 2D sprites that draw task `0x001D1648` draws once per
+  image: run twice, the bar was queued twice. A test build that skipped one
+  extra-step task at a time found it (run158: no ghost with it skipped). It is
+  now in `kNoRepeat` (`dbz3_loop_prof.cpp`) and runs once per image, as on the
+  PS3. No FPS cost (user test, light build).
+- **Dragon Universe, white skin.** The map's skin shader blends towards the fog
+  colour by `fog.y`, which on the RSX is the fog factor the hardware computes
+  from `SET_FOG_MODE` and `SET_FOG_PARAMS`. The port passed the raw fog
+  coordinate instead. The engine now hands mode and parameters to the pixel
+  shaders (`fp_alpha.yzw`) and the shader translator computes the factor with
+  RPCS3's formulas. The other fog-reading map shaders get the same fix.
+- **Blue opening movie.** The movie's YUV to RGB shader came out blue and
+  flashed white on the Switch although every input read alone was right
+  (planes, constants, vertex colour checked on the GPU, run141-146). It is
+  replaced by an override with the BT.601 constants the game always uploads
+  written in the code (`ps_3a9c050fe20a0ac2`); why reading them from the
+  constant buffer in that formula fails is still open.
+- **Boot text.** The boot no longer prints the runner's console text: the
+  screen stays black until the game draws. The text console comes up only
+  when the boot stops on an error.
+- **Crackling audio** in music, effects and voices. The read position of the
+  audio ring advanced in bursts, paced by the Switch output buffers; the
+  game's sound engine and its music mixer then wrote one block twice and
+  skipped the next, which played stale (about 20% of effect/voice blocks, 1% of
+  music blocks). Blocks are now mixed on a steady 5.33 ms clock
+  (`audio-steady-off` on the SD restores the old pacing).
+- **Missing Freezer shaders**: the two vertex shaders were captured and added.
+- **Animation jerks**: characters no longer jerk or run out of step (user test,
+  2 November 2026). Probable reason: duels now stay at 60 Hz with one logic
+  step per image, instead of switching between 30 and 60 Hz with uneven step
+  counts.
+- **NSP failed to install** with a progressive JPEG icon. The packager now
+  accepts only a baseline 256x256 JPEG and stops with a clear message otherwise.
+- **Saves outside the port folder**: earlier builds wrote them to
+  `sdmc:/gamedata/...`. They are moved automatically (see [Save data](#save-data)).
+- **Light build did not compile** after the end-of-frame wait counters
+  (`cellGcmSys.c` used a libnx header not included there).
+- **End-of-frame wait** (`0x002909C0`): the user-command callback is now
+  delivered by the waiting thread instead of whichever thread made the next
+  system call.
+
 ### Known bugs
-
-Bugs are sorted by priority:
-
-| Priority | Meaning |
-|---|---|
-| **P0** | Blocker: crash, game not playable, or unplayable performance. |
-| **P1** | Gameplay or performance problem that does not block play. |
-| **P2** | Visual bug that does not block play. |
-| **P3** | Minor (for example the opening movie). |
-
-#### P0
-
-- **Intermittent crash in a game allocator.** The game closes with an
-  Atmosphère error (Data Abort reading guest `0xFF000004`) in
-  `func_0005494C`, a size-class allocator reached from the main loop through
-  `0x48088` -> `0x53FA0` -> `0x55010`: a free-list link holds `0xFF000000`,
-  which looks like a colour written over the heap. Seen with Goku SSJ3's
-  Dragon Fist (run167, the dragon drawn blue just before, normally gold) and
-  twice on 2 November with the same address. Not reproducible on demand.
-
-#### P1
-
-- **Little headroom in heavy duels.** Images often arrive just in time, so
-  heavier scenes (other stages, transformations, beam struggles) may still drop
-  frames. The 60 FPS figure is measured on Goku vs Vegeta.
-- **Dragon Universe map and level screen at ~30 FPS.** Both ran at ~30 FPS or
-  lower before the 60 FPS work and have not been measured again since.
-- **Poses and animations out of sync after a while.** After playing for some
-  time, characters' poses and animations sometimes go out of sync. Cause not
-  known yet; not tied to a specific scene so far.
-
-#### P2
-
-- **Dragon Universe, flying.** At maximum flight speed, white pixel artifacts
-  sometimes appear on screen.
-- **White rim around face lines.** In close-ups (Goku on the result
-  screen) the eye, brow and nose lines have a thin white edge. Draw capture
-  (run160-decal): the lines are a DXT3 atlas (`0x05A5DA80`, 256x256) drawn by
-  the character program (`fp 01A7A580`) with `SRC_ALPHA/ONE_MINUS_SRC_ALPHA`
-  blending, linear filtering and no alpha test, and its transparent texels are
-  white (58k of 61k). Filtering mixes that white into the line edges. The port
-  applies the game's format, filter and blend as given; FXAA is not the cause.
-  Tried and reverted: alpha bleeding of the white fill for every DXT3/DXT5
-  texture at upload (made other scenes worse). Possible fixes, narrower: bleed
-  only the face atlases (by address or content), or filter with premultiplied
-  alpha in the shader for that program's blended draws only.
-
-#### P3
 
 - **Opening movie stutters.** The game moves to a new movie frame only 8-10
   times per second instead of 30 (`movie` line in `t23-draw-prof.log`). The
@@ -146,6 +145,8 @@ Bugs are sorted by priority:
   turn it off), checking the duel FPS too. A cheap test with no code change:
   a CPU overclock only as a test. If the movie gains about in proportion, the
   PPU lacks CPU; if not, it is waiting on something else.
+- **Dragon Universe, flying.** At maximum flight speed, white pixel artifacts
+  sometimes appear on screen.
 - **Audio reverb** is disabled to save CPU (`reverb.on` turns it back on).
 
 ### Next goals
@@ -153,88 +154,6 @@ Bugs are sorted by priority:
 - More headroom in duels: images often arrive just in time, so heavier scenes
   (other stages, transformations, beam struggles) may still drop frames.
 - 60 FPS on the DU map and the level screen.
-
-## Changelog
-
-### Unreleased
-
-- **Fixed: white screen during the ending movie** of Dragon Universe. Its
-  vertex shader (`vs_4be0700ed8cbefd6`) was missing, so the movie was not
-  drawn; it and seven other shaders seen at the end of DU were captured and
-  added.
-- **Added: crash-trail build** (`switch-dev.ps1 -CrashTrail`) and
-  `scripts/crash-report.ps1` for crashes that are hard to reproduce (see
-  [Reporting crashes](#reporting-crashes)).
-
-### 0.1.0 (6 November 2026)
-
-First public release, experimental. Source only: build the NSP from your own
-copy of the game as described below.
-
-**Performance**
-
-- **Duels at 60 FPS at stock clocks** (Goku vs Vegeta, from ~31 FPS at the
-  start). The renderer runs on two threads, a new pacer tries 60 Hz and backs
-  off when an image is late, frames are triple buffered with three frame sets
-  in flight, and the hottest game functions (math, draw state, materials,
-  shader binds, sprites, bone animation, end-of-frame wait) run as native code.
-  Every native function can be turned off with an SD file. See
-  [FPS milestones](#fps-milestones).
-- Lower per-draw renderer cost: fragment and vertex constant caching, texture
-  span and hash checks, batched texture uploads.
-
-**Fixed**
-
-- **Namek in Dragon Universe** renders its full terrain, and finishing-move
-  cutscenes are back in sync. Lifted AltiVec instructions (`vmulouh`,
-  `vmuleuh`, `vsubsws`, `vaddshs`, `vmsumshm`) read vector registers with the
-  wrong byte order.
-- **Missed and delayed controls**: the pad is read on every logic step.
-- **Dragon Universe, UI drawn twice.** The Dragon Ball bar flickered with a
-  second bar offset to the right. Task `0x001D16C8` queues 2D sprites and was
-  run again in the extra logic steps; it is now in `kNoRepeat`
-  (`dbz3_loop_prof.cpp`) and runs once per image, as on the PS3. No FPS cost.
-- **Dragon Universe, white skin.** The skin shader needs the fog factor the RSX
-  computes from `SET_FOG_MODE`/`SET_FOG_PARAMS`; the port passed the raw fog
-  coordinate. The shader translator now computes the factor (RPCS3 formulas)
-  for all fog-reading map shaders.
-- **Blue opening movie.** The YUV to RGB shader came out blue with white
-  flashes. It is replaced by an override with the BT.601 constants written in
-  the code (`ps_3a9c050fe20a0ac2`); why the original fails is still open.
-- **Crackling audio** in music, effects and voices: the game's sound engine
-  and music mixer wrote one block twice and skipped the next because the
-  Switch output buffers come in bursts. Blocks are now mixed on a steady
-  5.33 ms clock (`audio-steady-off` restores the old pacing).
-- **Animation jerks**: characters no longer jerk or run out of step, now that
-  duels stay at 60 Hz with one logic step per image.
-- **Missing Freezer shaders** added.
-- **Boot text**: the screen stays black until the game draws; the text console
-  comes up only on a boot error.
-- **End-of-frame wait** (`0x002909C0`): the user-command callback is delivered
-  by the waiting thread.
-- **NSP failed to install** with a progressive JPEG icon: the packager accepts
-  only a baseline 256x256 JPEG and says so otherwise.
-- **Light build did not compile** (`cellGcmSys.c` used a libnx header not
-  included there).
-
-**Added**
-
-- Saves in the Switch save data of the chosen user, with automatic move of
-  older SD saves (see [Save data](#save-data)).
-- Debug menu: render scale, GPU FXAA, VSync, frame cap (60/30/off), FPS and
-  frame time display with statistics, optional overclock rows, screenshots,
-  screen recording and per-draw frame capture (see [Debug menu](#debug-menu)).
-- SD switches to change behaviour without a rebuild (see
-  [SD switches](#sd-switches)).
-- Development NSP (game data on the SD) and full NSP (game data in RomFS).
-- Shader capture on the console and a collection script; light, metrics and
-  profiling build configurations.
-
-**Removed**
-
-- System video capture (Capture button recording) was tried and taken out: it
-  added a few frames of input delay in duels. Use the debug menu recording
-  instead.
 
 ## Requirements
 
@@ -381,7 +300,6 @@ that `switch-dev.ps1` just built.
 | `ShaderCapture` | Dumps shaders the build does not have to `t23-shaders/` on the SD card. |
 | `ScreenshotCapture` | Includes the debug-menu screenshot and screen-recording code. |
 | `Logic60` | Keeps the 60 Hz gameplay timing. Leave it on. |
-| `CrashTrail` | Session log for crash reports and a copy of the ELF in `build/symbols` (see [Reporting crashes](#reporting-crashes)). Also `switch-dev.ps1 -CrashTrail`. |
 
 **Default build** (use this to play and to measure FPS): `Lightweight = $true`,
 `ShaderCapture = $true` (it only writes files when a shader is missing) and
@@ -474,42 +392,6 @@ To collect logs after a test, start **DBI > Run MTP responder** and run
 `scripts/pull-switch-logs.ps1 -Game dbz3`. Logs are copied to
 `build/logs/dbz3/dev/runNN`.
 
-### Reporting crashes
-
-For crashes that are hard to reproduce, play with a crash-trail build. It is
-the light build plus a small session log, so it plays the same.
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build\switch-dev.ps1 `
-  -Game dbz3 -Feature crashlog -CrashTrail
-```
-
-The build keeps a copy of its ELF in `build/symbols/dbz3/<build id>/` (the
-last 10 builds). On the console every session writes
-`crash-trail-<unix time>.log` to `sdmc:/switch/dbz-budokai-3-switch/` (the
-last 10 are kept), from a low-priority thread, at most once a second:
-
-- boot stages and an exit through the game's own `exit()` (`exit (normal)`;
-  closing from the HOME menu ends the process without it, so a crash is told
-  apart by the Atmosphère report, not by this line),
-- the scheduler's task functions whenever they change (they tell menus, duels,
-  Dragon Universe and cutscenes apart),
-- every 5 s: images shown, FPS, current task, main thread `lr`, host heap,
-- if no image is shown for 10 s: where every guest thread is parked.
-
-When the game closes with an error, Atmosphère writes a crash report. Note what
-you were doing, then with **DBI > Run MTP responder** running:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\crash-report.ps1
-```
-
-It pulls the logs into a new `build/logs/dbz3/dev/runNN` and, for every crash
-report not summarised before, writes `crash-summary.txt` there: error type and
-address, the crashed thread's functions and source lines (from the matching
-ELF), and the end of that session's trail. Use `-RunDir <folder>` for logs
-already pulled.
-
 ## Debug menu
 
 The debug menu runs inside the game on the Switch. While it is open, the game
@@ -534,7 +416,6 @@ next start.
 | SHOW FPS | Toggles the FPS counter at the top right. |
 | SHOW FRAME MS | Toggles the frame time readout. |
 | SHOW FPS STATS / RESET FPS STATS | Average, minimum and maximum FPS; reset them. |
-| EXTRA REPEAT | Logic60 debugging, not saved. **OFF** (normal), **ALL DRAW TASKS**, or one draw task of the current scene (Left/Right, by address): those tasks also run in the extra logic steps with their GPU commands thrown away. Draw tasks otherwise run once per image, so what they animate falls behind at every extra step; with FRAME CAP 30 this shows within seconds. Choices go to the crash trail. Graphics glitches are expected while it is on. |
 | CPU CLOCK, GPU CLOCK, RAM CLOCK | Optional overclock like sys-clk, limited to the recommended official rates: CPU 1224 to 1785 MHz, GPU 460 to 921 MHz, RAM 1600 MHz. **DEFAULT** leaves the system clock alone. `NOW` shows the clock read back from the system. The choice is re-applied after docking changes and the system clocks are restored at DEFAULT and at exit. Turn sys-clk off for this game when using it. All performance numbers in this README are at DEFAULT. |
 | **Capture** | |
 | SAVE SCREENSHOT (A) | Saves a JPEG to `captures/shot_*.jpg` and closes the menu. Needs `ScreenshotCapture`. |

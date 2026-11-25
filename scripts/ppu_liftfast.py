@@ -117,8 +117,7 @@ def main():
                 sys.exit('ppu_liftfast.py: DU phase anchor changed: ' + anchor.strip())
         du = du.replace(DU_START, DU_START + '        dbz3_du_phase_probe(0);\n', 1)
         du = du.replace(DU_TAIL, DU_TAIL +
-                        '        dbz3_du_phase_probe(1);\n'
-                        '        if (dbz3_du_skip_render()) goto loc_001DE61C;\n', 1)
+                        '        dbz3_du_phase_probe(1);\n', 1)
         mid = DU_TAIL_MID + ' DRAIN_TRAMPOLINE(ctx);'
         if du.count(mid) != 1:
             mid = DU_TAIL_MID
@@ -157,7 +156,7 @@ def main():
     text = text.replace('memcpy(vm_base + (uint32_t)ea,', 'lf_vstore(vm_base + (uint32_t)ea,')
 
     if INCLUDE in text:
-        text = text.replace(INCLUDE, INCLUDE + '\n#include "dbz3_liftfast.h"\nextern "C" void dbz3_du_phase_probe(uint32_t);\nextern "C" int dbz3_du_skip_render(void);\nextern "C" int dbz3_tlsf_free_check(ppu_context*) __attribute__((weak));\nextern "C" int dbz3_tlsf_free_entry_check(ppu_context*) __attribute__((weak));\nextern "C" void dbz3_tlsf_heap_init(ppu_context*) __attribute__((weak));', 1)
+        text = text.replace(INCLUDE, INCLUDE + '\n#include "dbz3_liftfast.h"\nextern "C" void dbz3_du_phase_probe(uint32_t);\nextern "C" int dbz3_tlsf_free_check(ppu_context*) __attribute__((weak));\nextern "C" int dbz3_tlsf_free_entry_check(ppu_context*) __attribute__((weak));\nextern "C" void dbz3_tlsf_heap_init(ppu_context*) __attribute__((weak));', 1)
     else:
         sys.exit('ppu_liftfast.py: %s does not include ppu_recomp.h' % src)
 

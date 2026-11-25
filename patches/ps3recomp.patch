@@ -1131,7 +1131,7 @@ index 5e3b510..33bcbdc 100644
      if (!si) {
 @@ -465,16 +475,17 @@ static s32 spurs_initialize_common(u32 spurs_ea, u32 nspus, const char* prefix)
      /* Real BE instance: zero it, then the few live fields. (The global
-      * workload table is NOT wiped here — the title may init several SPURS
+      * workload table is NOT wiped here â€” the title may init several SPURS
       * instances before adding workloads to any of them.) */
 -    memset(vm_base + spurs_ea, 0, SPURS_INST_SIZE);
 +    memset(vm_base + spurs_ea, 0, second_version ? 0x2000 : SPURS_INST_SIZE);
@@ -1309,7 +1309,7 @@ index 5e3b510..33bcbdc 100644
 @@ -2111,9 +2157,68 @@ s32 _cellSpursEventFlagInitialize(void* spurs, void* taskset,
  }
  
- /* _cellSpursSendSignal — internal signal delivery */
+ /* _cellSpursSendSignal â€” internal signal delivery */
 +/* SPU frame post-filter skip (BLUS30966 Budokai 3; T23 performance).
 + *
 + * Every frame the title copies its 1280x720 scene to main memory, signals three
@@ -1937,7 +1937,7 @@ index f6e4e31..0144172 100644
      { static int dbg = -1;
        if (dbg < 0) dbg = getenv("SYS_HEAP_DBG") ? 1 : 0;
 diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
-index ac0a7a8..56a45c9 100644
+index ac0a7a8..ef94e7a 100644
 --- a/libs/video/cellGcmSys.c
 +++ b/libs/video/cellGcmSys.c
 @@ -11,6 +11,11 @@
@@ -1952,7 +1952,46 @@ index ac0a7a8..56a45c9 100644
  #include "../../runtime/platform/win32_compat.h"
  #include "../../runtime/ppu/ppu_memory.h"   /* vm_write32 (translate + byte-swap, OOB-safe) */
  #include "../../runtime/memory/vm.h"    /* VM_HLE_INJECT_BASE */
-@@ -755,6 +760,48 @@ void cellGcmTickFlip(void)
+@@ -267,6 +272,16 @@ static _Atomic(u64) s_user_pending = 0;
+ #define GCM_USER_PENDING_STORE(value) atomic_store(&s_user_pending, (value))
+ #define GCM_USER_PENDING_TAKE() atomic_exchange(&s_user_pending, 0)
+ #endif
++#ifdef _WIN32
++#define GCM_USER_PENDING_PEEK() ((u64)s_user_pending)
++#else
++#define GCM_USER_PENDING_PEEK() ((u64)atomic_load(&s_user_pending))
++#endif
++/* Freeze diagnostics (cellGcm_user_cmd_snapshot): user commands queued and
++ * handed to the guest handler, walker passes, and a pump in progress. Plain
++ * counters, read racily from another thread. */
++static volatile u32 s_user_queued = 0, s_user_delivered = 0, s_fifo_drains = 0;
++static volatile int s_pump_busy = 0;
+ 
+ /* Tile configuration (up to 15 tiles, 8 commonly used) */
+ static CellGcmTileInfo s_tiles[CELL_GCM_MAX_TILE_COUNT];
+@@ -696,6 +711,7 @@ void cellGcm_request_tick(void)
+ void ppu_gcm_pump(void)
+ {
+     if (!GCM_PUMP_TRY_ENTER()) return;
++    s_pump_busy = 1;
+     long p = (long)GCM_PENDING_TAKE();
+     u64 user = GCM_USER_PENDING_TAKE();
+     /* GCM_PUMP_DBG=1: how often each guest handler is actually delivered. */
+@@ -719,9 +735,12 @@ void ppu_gcm_pump(void)
+     }
+     if (user) {
+         u32 cmd = (u32)user;
+-        if (s_user_handler_opd && g_ps3_guest_caller)
++        if (s_user_handler_opd && g_ps3_guest_caller) {
+             g_ps3_guest_caller(s_user_handler_opd, (uint64_t)cmd, 0, 0, 0, 0, 0, 0, 0);
++            s_user_delivered++;
++        }
+     }
++    s_pump_busy = 0;
+     GCM_PUMP_LEAVE();
+ }
+ 
+@@ -755,6 +774,48 @@ void cellGcmTickFlip(void)
   * rsx_process_command_buffer so the game's clears/draws render. */
  /* Translate an RSX IO offset to a guest EA via the offset table (1MB pages,
   * populated by cellGcmInit / cellGcmMapMainMemory / MapEaIoAddress). */
@@ -2001,7 +2040,7 @@ index ac0a7a8..56a45c9 100644
  static u32 gcm_io2ea(u32 io)
  {
      u32 page = io >> 20;
-@@ -795,6 +842,29 @@ static u32 s_sema_offset = 0;   /* NV406E semaphore offset (label window) */
+@@ -795,6 +856,29 @@ static u32 s_sema_offset = 0;   /* NV406E semaphore offset (label window) */
  #define GCM_RECYCLE_MARGIN 0x20000u
  static u32 gcm_ea2io(u32 ea);   /* defined with the wrap callback below */
  static u32 s_fifo_getoff  = 0;
@@ -2031,7 +2070,7 @@ index ac0a7a8..56a45c9 100644
  static u32 s_last_ring_off = 0;   /* last offset the walker actually consumed */
  static u32 s_fifo_calloff = 0;
  
-@@ -886,7 +956,63 @@ static void nv3089_engine_wrote(u32 dst_pitch, u32 x0, u32 y0, u32 x1, u32 y1)
+@@ -886,7 +970,63 @@ static void nv3089_engine_wrote(u32 dst_pitch, u32 x0, u32 y0, u32 x1, u32 y1)
                                  x1 - x0, y1 - y0);
  }
  
@@ -2095,7 +2134,7 @@ index ac0a7a8..56a45c9 100644
  {
      u32 out_w = s_nv3089.out_sz & 0xFFFF, out_h = s_nv3089.out_sz >> 16;
      u32 out_x = s_nv3089.out_pt & 0xFFFF, out_y = s_nv3089.out_pt >> 16;
-@@ -1030,6 +1156,32 @@ static void nv3089_blit(void)
+@@ -1030,6 +1170,32 @@ static void nv3089_blit(void)
      u32 dbpp = (s_gcm2d.color_fmt == 4u /* R5G6B5 */) ? 2u
               : (s_gcm2d.color_fmt == 1u /* Y8 */)     ? 1u : 4u;
      u32 bpp = (sbpp == dbpp) ? sbpp : 4u;
@@ -2128,7 +2167,7 @@ index ac0a7a8..56a45c9 100644
      if (bpp == 4) nv3089_engine_read(in_pitch, out_w, out_h);
      for (u32 y = 0; y < out_h; y++) {
          u32 dy = out_y + y;
-@@ -1133,6 +1285,18 @@ static void gcm_2d_method(u32 subch, u32 method, u32 data)
+@@ -1133,6 +1299,18 @@ static void gcm_2d_method(u32 subch, u32 method, u32 data)
                           base + py * dst_pitch + px * 4, s_gcm2d.dst_offset,
                           s_gcm2d.dst_dma, px, py, dst_pitch, data); }
              vm_write32(base + py * dst_pitch + px * 4, data);
@@ -2147,7 +2186,7 @@ index ac0a7a8..56a45c9 100644
              return;
          }
          return;
-@@ -1351,26 +1515,40 @@ static void gcm_fifo_resync_why(const char* why, u32* getoff, u32 put)
+@@ -1351,26 +1529,40 @@ static void gcm_fifo_resync_why(const char* why, u32* getoff, u32 put)
       * every one twice. */
      u32 from = (*getoff <= land) ? *getoff : s_last_ring_off;
      if (from < land) {
@@ -2196,7 +2235,7 @@ index ac0a7a8..56a45c9 100644
      for (u32 t = 0; t < GCM_TRACE_N; t++) {
          u32 k = (s_tr_i + t) % GCM_TRACE_N;
          if (!s_tr_w[k]) continue;
-@@ -1385,6 +1563,24 @@ static void gcm_fifo_dump_around(u32 getoff)
+@@ -1385,6 +1577,24 @@ static void gcm_fifo_dump_around(u32 getoff)
          fprintf(stderr, "[FIFODUMP] %+3d io=%08X w=%08X%s\n",
                  k, io, vm_read32(ea), k ? "" : "   <-- bad word");
      }
@@ -2221,7 +2260,7 @@ index ac0a7a8..56a45c9 100644
  }
  
  
-@@ -1449,6 +1645,17 @@ static void gcm_ref_publish_one(void)
+@@ -1449,6 +1659,17 @@ static void gcm_ref_publish_one(void)
   * itself performs guest reads) and never blocks a spinning game thread. */
  static SRWLOCK s_gcm_fifo_lock = SRWLOCK_INIT;
  static void gcm_rsx_process_fifo_unlocked(void);
@@ -2239,7 +2278,15 @@ index ac0a7a8..56a45c9 100644
  
  /* Kick event: a game thread whose fence wait finds the queue DRY signals the
   * present thread to run the FIFO walker NOW instead of on its next 16 ms
-@@ -1632,6 +1839,9 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1517,6 +1738,7 @@ void cellGcm_rsx_process_fifo(void)
+ 
+ static void gcm_rsx_process_fifo_unlocked(void)
+ {
++    s_fifo_drains++;
+     { static unsigned _n = 0; static unsigned long long _t0 = 0;
+       extern unsigned long long ps3_ms_now(void);
+       _n++;
+@@ -1632,6 +1854,9 @@ static void gcm_rsx_process_fifo_unlocked(void)
       * catch up, and the reason is the whole diagnosis. */
      const char* why = "caught-up";
      while (s_fifo_getoff != put && budget-- > 0) {
@@ -2249,7 +2296,7 @@ index ac0a7a8..56a45c9 100644
          u32 ea = gcm_io2ea(s_fifo_getoff);
          if (!ea) {
              /* get is sitting on an IO offset with no mapping -- the title
-@@ -1713,7 +1923,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1713,7 +1938,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
                if (_rd) fprintf(stderr, "[JMP] %08X -> %08X (put=%08X)\n",
                                 s_fifo_getoff, w & 0x1FFFFFFCu, put); }
              { u32 tgt = w & 0x1FFFFFFCu;
@@ -2258,7 +2305,7 @@ index ac0a7a8..56a45c9 100644
                /* A JUMP to its own address is the "park the RSX here" idiom:
                 * the title leaves it at the write head so the GPU stops if it
                 * catches up, and overwrites it when the next segment is
-@@ -1736,7 +1946,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1736,7 +1961,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
          }
          if ((w & 3) == 2) {                    /* CALL: offset | 2 */
              { u32 tgt = w & 0x1FFFFFFCu;
@@ -2267,7 +2314,7 @@ index ac0a7a8..56a45c9 100644
                s_fifo_calloff = s_fifo_getoff + 4;
                s_fifo_getoff  = tgt; }
              continue;
-@@ -1762,11 +1972,14 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1762,11 +1987,14 @@ static void gcm_rsx_process_fifo_unlocked(void)
                    u32 mi = (method >> 2) & 2047;
                    hist[mi]++; tot[mi] += count;
                    static u64 seen = 0;
@@ -2283,7 +2330,7 @@ index ac0a7a8..56a45c9 100644
                    }
                } }
              /* NV406E semaphore: OFFSET(0x64) / ACQUIRE(0x68) / RELEASE(0x6C).
-@@ -1807,7 +2020,37 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1807,7 +2035,37 @@ static void gcm_rsx_process_fifo_unlocked(void)
                  s_fifo_getoff += 4 + count * 4;
                  continue;
              }
@@ -2321,7 +2368,7 @@ index ac0a7a8..56a45c9 100644
                  u32 dea = gcm_io2ea(s_fifo_getoff + 4 + i * 4);
                  if (!dea) break;
                  u32 m = (type == 0) ? method + i * 4 : method;
-@@ -1899,7 +2142,15 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1899,7 +2157,15 @@ static void gcm_rsx_process_fifo_unlocked(void)
                   * same reason the live engine does, and masks them itself. */
                  { static int eng = -1;
                    if (eng < 0) eng = rsx_draw_engine_enabled();
@@ -2338,7 +2385,7 @@ index ac0a7a8..56a45c9 100644
  
                  /* RSX_LIVE_FEED_DBG=1: what the FIFO actually carries. Counted
                   * for any run, live engine or not, so the method stream and the
-@@ -1927,7 +2178,22 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1927,7 +2193,22 @@ static void gcm_rsx_process_fifo_unlocked(void)
                  } else if (mfull == 0xE920u || mfull == 0xE924u) {
                      cellGcmSetFlipCommand(vm_read32(dea) & 7u);
                  } else if (subch == 0 || (subch == 1 && !s1_2d)) {
@@ -2361,7 +2408,7 @@ index ac0a7a8..56a45c9 100644
                      /* NV406E_SET_REFERENCE: queue the fence value for PACED
                       * publication (gcm_ref_publish below) instead of letting a
                       * later fence in the same batch overwrite it. */
-@@ -1956,6 +2222,9 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1956,6 +2237,9 @@ static void gcm_rsx_process_fifo_unlocked(void)
          s_fifo_getoff += 4;                    /* unknown word: skip */
      }
  
@@ -2371,7 +2418,7 @@ index ac0a7a8..56a45c9 100644
      /* Walker watchdog. Everything above recovers from a *recognised* stall --
       * a branch we cannot take, a park the title abandoned. A walker that stops
       * for any other reason simply freezes `get` for the rest of the run and
-@@ -2030,7 +2299,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -2030,7 +2314,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
       *
       * ponytail: append the JUMP at `current` the way the SDK's own callback
       * does, rather than tracking a second copy of the ring's geometry. */
@@ -2380,7 +2427,7 @@ index ac0a7a8..56a45c9 100644
          u32 ctx = vm_read32(s_gcm_ctx_out_ea);
          u32 begin = ctx ? vm_read32(ctx + 0x0) : 0;
          u32 end   = ctx ? vm_read32(ctx + 0x4) : 0;
-@@ -3372,10 +3641,26 @@ void cellGcmSetUserCommand(u32 cmd)
+@@ -3372,10 +3656,94 @@ void cellGcmSetUserCommand(u32 cmd)
  /* Called when a FIFO consumer retires a user-interrupt method. Publishing
   * the cause and pending marker is atomic; guest code runs later in the pump.
   * Like the driver cause register, multiple pending commands coalesce. */
@@ -2401,9 +2448,77 @@ index ac0a7a8..56a45c9 100644
  {
      GCM_USER_STORE(cmd);
      GCM_USER_PENDING_STORE((1ULL << 32) | cmd);
++    s_user_queued++;
 +#ifdef __SWITCH__
 +    __atomic_store_n(&g_gcm_user_queued_tick, gcm_system_tick(), __ATOMIC_RELAXED);
 +#endif
++}
++
++/* 0xEB00 methods the title has written into its ring (put .. context current)
++ * but not yet published through `put`: a command stuck there is not lost by
++ * the walker, it was never flushed. */
++static unsigned gcm_user_cmds_unflushed(u32 put, u32 cur)
++{
++    const u32 from = gcm_io2ea(put);
++    unsigned n = 0;
++    if (!from || cur <= from || cur - from > 0x100000u) return 0;
++    for (u32 ea = from; ea + 8 <= cur; ea += 4) {
++        u32 w = vm_read32(ea);
++        if ((w >> 29) == 0 && (w & 0xFFFFu) == 0xEB00u && ((w >> 18) & 0x7FFu) != 0) n++;
++    }
++    return n;
++}
++
++/* One line on the user-command path for a frozen title: is the walker still
++ * running (drains), has it caught up with `put`, how many 0xEB00 methods sit
++ * in the words it has not walked yet, and how many commands were queued and
++ * delivered. Meant for a port's stall report; reads everything racily. */
++int cellGcm_user_cmd_snapshot(char* buf, size_t n)
++{
++    const u32 put = vm_read32(GCM_CONTROL_GUEST_ADDR + 0);
++    const u32 get = s_fifo_getoff;
++    unsigned ahead = 0, words = 0;
++    u32 last_arg = 0;
++    if (get < put && put - get <= 0x100000u) {
++        for (u32 io = get; io + 8 <= put; io += 4) {
++            u32 ea = gcm_io2ea(io); if (!ea) break;
++            u32 w = vm_read32(ea);
++            words++;
++            if ((w >> 29) == 0 && (w & 0xFFFFu) == 0xEB00u && ((w >> 18) & 0x7FFu) != 0) {
++                u32 dea = gcm_io2ea(io + 4);
++                if (dea) last_arg = vm_read32(dea);
++                ahead++;
++            }
++        }
++    }
++    const u32 ctx = s_gcm_ctx_out_ea ? vm_read32(s_gcm_ctx_out_ea) : 0;
++    const u32 cur = ctx ? vm_read32(ctx + 0x8) : 0;
++    unsigned unflushed = gcm_user_cmds_unflushed(put, cur);
++    return snprintf(buf, n,
++        "gcm get=0x%08X put=0x%08X last_ring=0x%08X drains=%u unwalked_words=%u "
++        "eb00_ahead=%u (last arg 0x%08X) eb00_unflushed=%u pending=0x%llX queued=%u "
++        "delivered=%u pump_busy=%d handler=0x%08X ctx=0x%08X cur=0x%08X put_ea=0x%08X",
++        get, put, s_last_ring_off, (unsigned)s_fifo_drains, words, ahead, last_arg,
++        unflushed, (unsigned long long)GCM_USER_PENDING_PEEK(), (unsigned)s_user_queued,
++        (unsigned)s_user_delivered, s_pump_busy, s_user_handler_opd,
++        ctx, cur, gcm_io2ea(put));
++}
++
++/* Last resort for a title stuck waiting for a user command that never came:
++ * queue `cmd` as if the FIFO had reached it, but only when the walker has
++ * consumed everything up to `put` and nothing is pending -- i.e. the RSX has
++ * finished all the work the command would have followed. Returns 1 if queued.
++ * The caller still has to pump. */
++int cellGcm_user_cmd_rescue(u32 cmd)
++{
++    const u32 put = vm_read32(GCM_CONTROL_GUEST_ADDR + 0);
++    if (s_fifo_getoff != put || GCM_USER_PENDING_PEEK() != 0 || s_pump_busy) return 0;
++    /* Written but not flushed: a different bug, and delivering early would
++     * run the handler ahead of work the RSX has not seen yet. */
++    const u32 ctx = s_gcm_ctx_out_ea ? vm_read32(s_gcm_ctx_out_ea) : 0;
++    if (ctx && gcm_user_cmds_unflushed(put, vm_read32(ctx + 0x8))) return 0;
++    cellGcmQueueUserCommand(cmd);
++    return 1;
  }
  
  /* Invalidate a tile region (unbind + clear) */
@@ -10449,7 +10564,7 @@ index 2a74e51..6afe8a2 100644
 -            return;
 -        }
 -        if (ctx->pc == SPURS_PM_SELECT_WORKLOAD_LS) {
--            /* cellSpursModulePoll: report "no contention — keep running".
+-            /* cellSpursModulePoll: report "no contention â€” keep running".
 -             * (One virtual SPU per workload here, so nothing ever preempts.) */
 -            unsigned n = ++g_spurs_pm_polls;
 -            if (n <= 4 || (n % 4096) == 0)
@@ -11038,7 +11153,7 @@ index 2a74e51..6afe8a2 100644
 -}
 -
 -/* ===========================================================================
-- * Execution trace (for §3 validation: diff vs RPCS3 SPU interpreter)
+- * Execution trace (for Â§3 validation: diff vs RPCS3 SPU interpreter)
 - *
 - * When the lifter is invoked with --trace, every emitted instruction is
 - * surrounded by spu_trace_pc(ctx, PC) before execution and spu_trace_rt(
@@ -11183,7 +11298,7 @@ index 2a74e51..6afe8a2 100644
 +            return;
 +        }
 +        if (ctx->pc == SPURS_PM_SELECT_WORKLOAD_LS) {
-+            /* cellSpursModulePoll: report "no contention — keep running".
++            /* cellSpursModulePoll: report "no contention â€” keep running".
 +             * (One virtual SPU per workload here, so nothing ever preempts.) */
 +            unsigned n = ++g_spurs_pm_polls;
 +            if (n <= 4 || (n % 4096) == 0)
@@ -11772,7 +11887,7 @@ index 2a74e51..6afe8a2 100644
 +}
 +
 +/* ===========================================================================
-+ * Execution trace (for §3 validation: diff vs RPCS3 SPU interpreter)
++ * Execution trace (for Â§3 validation: diff vs RPCS3 SPU interpreter)
 + *
 + * When the lifter is invoked with --trace, every emitted instruction is
 + * surrounded by spu_trace_pc(ctx, PC) before execution and spu_trace_rt(
@@ -13540,7 +13655,7 @@ index bcb1df4..f6b2b67 100644
 @@ -608,7 +619,14 @@ static int64_t sys_spu_thread_initialize_handler(ppu_context* ctx)
      { extern void (*g_spurs_kernel_hook)(uint32_t); if (g_spurs_kernel_hook) g_spurs_kernel_hook(args_ea); }
      /* Read entry point from the SPU image struct if available.
-      * sys_spu_image layout: type/entry/segs/nsegs — entry at +4. */
+      * sys_spu_image layout: type/entry/segs/nsegs â€” entry at +4. */
 -    if (img_ea) t->entry_point = vm_read_be32(img_ea + 4);
 +    if (img_ea) {
 +        t->entry_point = vm_read_be32(img_ea + 4);

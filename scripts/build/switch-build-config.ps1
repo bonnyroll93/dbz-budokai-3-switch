@@ -1,7 +1,6 @@
 # Edit these values before running scripts/build/switch-dev.ps1.
 # $true enables a feature; $false disables it. Lightweight removes the
 # high-frequency profilers; ShaderCapture and ScreenshotCapture are separate.
-# Logic60 keeps the gameplay timing used by the playable build.
 $SwitchBuild = @{
     Lightweight             = $true
     ProfilePpuFunctions     = $false
@@ -15,7 +14,6 @@ $SwitchBuild = @{
     # Keep shader dumps and capture code out of the FPS test build.
     ShaderCapture           = $true
     ScreenshotCapture       = $false
-    Logic60                 = $true
     # Session log for crash reports (crash-trail-*.log) and a copy of the ELF
     # in build\symbols for scripts\crash-report.ps1. Same cost as the light build.
     CrashTrail              = $false

@@ -9,9 +9,11 @@
  *   0x1C000 0x15B10 0x1573C 0x1F318 0x24588 0x15EA8 0x1745C 0x28FD8
  *   0x1F9DC0 0x287F4 0x15AB8(32) 0x15C54 0x2E9A4
  *   0x487FC        flip (cellRescSetConvertAndFlip) + sysutil callbacks
- * The game advances its logic one step per pass, so at 30 FPS it runs at
- * half speed. This measures what each step costs, to find the update/draw
- * split for "2 logic steps per drawn frame".
+ * The game advances its logic one step per pass, as on PS3: the flip wrapper
+ * holds the passes to the debug menu FRAME CAP (pace_before_flip). This also
+ * measures what each step costs. (The "Logic60" extra logic steps per drawn
+ * frame were removed on 2026-11-25: they ran tasks in half-built states,
+ * run233 crash, and cost more CPU than they saved, run234.)
  *
  * The callees are in ppu_recomp_000.cpp, main in ppu_recomp_002.cpp, so the
  * linker's --wrap catches main's calls (CMakeLists.txt). The scene call is
@@ -64,7 +66,6 @@ extern "C" void dbz3_tlsf_walk(void);                                /* dbz3_tls
 #endif
 /* Debug menu FRAME CAP (switch_input.c): 60, 30 or 0 = off. */
 extern "C" __attribute__((weak)) int switch_debug_frame_cap(void);
-extern "C" __attribute__((weak)) int switch_debug_extra_repeat(void);   /* switch_input.c */
 /* End-of-frame wait counters, filled by 0x002909C0 (dbz3_native_math.cpp). */
 extern "C" { uint64_t g_fw_waits, g_fw_wait_ticks, g_fw_fifo_ticks, g_fw_deliver_ticks, g_fw_max_ticks; }
 #ifdef PORT_DBZ3_HEAP_TRACE
@@ -109,7 +110,6 @@ struct TaskStat {
     uint32_t task;        /* last task object seen with it */
     uint32_t order;       /* position in the list, last pass */
     uint64_t runs, us, max_us, gcm_runs, gcm_bytes;
-    uint64_t extra_runs, extra_us;
 };
 
 struct Window {
@@ -122,12 +122,7 @@ struct Window {
     uint64_t target_us[kMaxTargets];
     TaskStat tasks[kMaxTasks];
     uint64_t task_passes;
-    uint64_t steps_hist[5];        /* passes that ran 1/2/3/4 logic steps */
-    uint64_t extra_us, extra_max_us, extra_tasks;
-    uint64_t gated_load, gated_list, aborted;   /* extra steps not run */
-    uint64_t rd_runs, rd_rolled, rd_kb, rd_noroom, rd_flushed, rd_wrapped;  /* T44 */
     uint64_t du_phase_runs[2][3], du_phase_us[2][3], du_phase_gcm[2][3];
-    uint64_t du_render_skipped;
 #ifdef PORT_DBZ3_LEVEL_FUNCTION_PROFILE
     uint64_t level30790_calls, level30790_ticks, level30790_max_ticks;
 #endif
@@ -162,7 +157,6 @@ void add(int slot, uint64_t us)
 #endif
 }
 
-int task_class(uint32_t fn);
 
 void flush(uint64_t now)
 {
@@ -187,27 +181,8 @@ void flush(uint64_t now)
                 (double)g_w.target_us[i] / (double)g_w.target_frames[i]);
     if (g_w.task_passes) {
         const double tp = (double)g_w.task_passes;
-        const uint64_t steps = g_w.steps_hist[1] + 2u * g_w.steps_hist[2] +
-                               3u * g_w.steps_hist[3] + 4u * g_w.steps_hist[4];
-        const uint64_t extra_steps = g_w.steps_hist[2] + 2u * g_w.steps_hist[3] +
-                                     3u * g_w.steps_hist[4];
-        fprintf(g_log, "  logic60 steps/s=%.1f passes_1/2/3/4=%llu/%llu/%llu/%llu"
-                       " extra_avg_us=%.0f extra_max_us=%llu extra_tasks/step=%.1f\n",
-                (double)steps * 1000000.0 / (double)lp_us(now - g_window_start),
-                (unsigned long long)g_w.steps_hist[1], (unsigned long long)g_w.steps_hist[2],
-                (unsigned long long)g_w.steps_hist[3], (unsigned long long)g_w.steps_hist[4],
-                extra_steps ? (double)g_w.extra_us / (double)extra_steps : 0.0,
-                (unsigned long long)g_w.extra_max_us,
-                extra_steps ? (double)g_w.extra_tasks / (double)extra_steps : 0.0);
-        fprintf(g_log, "  logic60 deferred: loading=%llu task_list_changed=%llu aborted=%llu\n",
-                (unsigned long long)g_w.gated_load, (unsigned long long)g_w.gated_list,
-                (unsigned long long)g_w.aborted);
-        fprintf(g_log, "  repeat-draw: runs=%llu rolled_back=%llu kb=%llu no_room=%llu flushed=%llu wrapped=%llu\n",
-                (unsigned long long)g_w.rd_runs, (unsigned long long)g_w.rd_rolled,
-                (unsigned long long)g_w.rd_kb, (unsigned long long)g_w.rd_noroom,
-                (unsigned long long)g_w.rd_flushed, (unsigned long long)g_w.rd_wrapped);
-        for (int pass = 0; pass < 2; ++pass) {
-            fprintf(g_log, "  du-phase pass=%s", pass ? "extra" : "regular");
+        for (int pass = 0; pass < 1; ++pass) {
+            fprintf(g_log, "  du-phase");
             for (int phase = 0; phase < 3; ++phase) {
                 const uint64_t runs = g_w.du_phase_runs[pass][phase];
                 fprintf(g_log, " p%d=%llu/%.0fus/%.1fkb", phase,
@@ -217,8 +192,6 @@ void flush(uint64_t now)
             }
             fputc('\n', g_log);
         }
-        fprintf(g_log, "  du-render-skipped=%llu\n",
-                (unsigned long long)g_w.du_render_skipped);
 #ifdef PORT_DBZ3_LEVEL_FUNCTION_PROFILE
         fprintf(g_log, "  level30790 calls=%llu total_us=%llu avg_us=%.1f max_us=%llu\n",
                 (unsigned long long)g_w.level30790_calls,
@@ -232,14 +205,11 @@ void flush(uint64_t now)
             const TaskStat& t = g_w.tasks[i];
             fprintf(g_log,
                     "  task fn=0x%08X obj=0x%08X order=%2u runs/pass=%.2f avg_us=%6.0f"
-                    " max_us=%6llu gcm_runs=%llu gcm_kb/pass=%.1f extra/pass=%.2f extra_avg_us=%.0f class=%u\n",
-                    t.fn, t.task, t.order, (double)t.runs / tp,   /* regular pass only */
+                    " max_us=%6llu gcm_runs=%llu gcm_kb/pass=%.1f\n",
+                    t.fn, t.task, t.order, (double)t.runs / tp,
                     t.runs ? (double)t.us / (double)t.runs : 0.0,
                     (unsigned long long)t.max_us, (unsigned long long)t.gcm_runs,
-                    (double)t.gcm_bytes / 1024.0 / tp,
-                    (double)t.extra_runs / tp,
-                    t.extra_runs ? (double)t.extra_us / (double)t.extra_runs : 0.0,
-                    (unsigned)task_class(t.fn));
+                    (double)t.gcm_bytes / 1024.0 / tp);
         }
     }
     fflush(g_log);
@@ -311,7 +281,7 @@ extern "C" void dbz3_du_phase_probe(uint32_t phase)
     return;
 #else
     if (g_dbz3_cur_task_fn != 0x001DBC58u ||
-        (g_dbz3_cur_pass != 1 && g_dbz3_cur_pass != 2)) return;
+        g_dbz3_cur_pass != 1) return;
     const uint64_t tick = lp_ticks();
     const uint32_t gcm = gcm_current();
     if (phase == 0) {
@@ -335,181 +305,53 @@ extern "C" void dbz3_du_phase_probe(uint32_t phase)
 #endif
 }
 
-/* Task classes for the 60 Hz logic step: a task function that has ever moved
- * the title's GCM write pointer draws; one seen only without GCM writes is
- * logic. Persistent (not reset per log window). */
-enum { CLS_UNKNOWN = 0, CLS_LOGIC = 1, CLS_DRAW = 2 };
-constexpr int kClassSlots = 512;                  /* power of two */
-uint32_t g_cls_fn[kClassSlots];
-uint8_t g_cls[kClassSlots];
-
-int class_slot(uint32_t fn)
-{
-    uint32_t h = (fn >> 2) * 2654435761u;
-    for (int i = 0; i < kClassSlots; ++i) {
-        const int s = (int)((h + (uint32_t)i) & (kClassSlots - 1));
-        if (g_cls_fn[s] == fn || g_cls_fn[s] == 0) return s;
-    }
-    return -1;
-}
-
-void classify(uint32_t fn, int drew)
-{
-    const int s = class_slot(fn);
-    if (s < 0) return;
-    g_cls_fn[s] = fn;
-    if (drew) g_cls[s] = CLS_DRAW;
-    else if (g_cls[s] == CLS_UNKNOWN) g_cls[s] = CLS_LOGIC;
-}
-
-int task_class(uint32_t fn)
-{
-    const int s = class_slot(fn);
-    return (s < 0 || g_cls_fn[s] != fn) ? CLS_UNKNOWN : g_cls[s];
-}
-
-/* Real-time accumulator: logic steps of 1/60 s owed since the last pass. */
-constexpr uint64_t kStepUs = 16667u;
-constexpr int kMaxSteps = 4;   /* G1: frames up to ~67 ms still keep real time */
-/* T43: time owed after a stall is kept up to 0.5 s and paid back at up to
- * kMaxSteps steps per frame. With the old 3-step cap every 100-400 ms hitch
- * (cutscene shot changes load models and textures) threw away 3-20 steps for
- * good, so cutscene animation fell further behind the real-time voice at each
- * cut. Longer stalls (loading screens) still drop the excess. */
-constexpr uint64_t kCatchUpUs = 30u * kStepUs;
-uint64_t g_step_last = 0;
-uint64_t g_step_acc = 0;
-/* Logic60 counters since boot, never reset (crash trail heartbeat):
- * passes, logic steps run (regular + extra), passes whose extra steps were
- * held back by a pending load, steps cut short by a load, time owed that
- * was thrown away by the catch-up cap (us). */
-uint64_t g_l60_passes = 0, g_l60_steps = 0, g_l60_gated = 0, g_l60_aborted = 0;
-uint64_t g_l60_dropped_us = 0;
-
-void cap_step_acc(void)
-{
-    if (g_step_acc > kCatchUpUs) {
-        g_l60_dropped_us += g_step_acc - kCatchUpUs;
-        g_step_acc = kCatchUpUs;
-    }
-}
-
 /*
- * Frame pacing for logic60 (run29: frames of 25-45 ms gave 1, 2 or 3 logic
- * steps per image -> right average speed, uneven motion). Present at a fixed
- * rate instead, 30 Hz (2 logic steps per image) or 60 Hz (1 step). Called just
- * before the flip; sleeps until the next slot.
- *
- * The choice is made on the measured cost of a 60 Hz image (the work since
- * the last flip minus any extra logic steps run in it). At 30 Hz that cost is
- * only an estimate, and run133 showed it 5-8 ms too high (17-21 ms estimated,
- * 8-13 ms measured at 60 Hz in the same duel), which kept the game at 30 Hz.
- * So 60 Hz is tried rather than predicted: at 30 Hz, once the estimate is
- * below kPaceProbeUs, switch to 60 Hz for kPaceProbeFrames images and keep it
- * if the measured cost averages at most kPaceDownUs. A failed try waits
- * twice as long before the next one (kPaceBackoffMin..Max images); at 60 Hz,
- * a measured average above kPaceDownUs drops back to 30 Hz.
+ * Frame limiter (debug menu FRAME CAP). The title advances its logic one step
+ * per image, as on PS3, where the display held it to 60 images/s. Here nothing
+ * else waits (run234: up to ~120 images/s, so the game ran fast), so sleep just
+ * before the flip until the next slot: 60 -> 16.7 ms, 30 -> 33.3 ms (the game
+ * then runs at half speed), 0 = off (no limit: tests only).
  */
-constexpr double kPaceProbeUs = 20000.0;
-constexpr double kPaceDownUs = 16700.0;
-constexpr uint32_t kPaceProbeFrames = 60;        /* ~1 s at 60 Hz */
-constexpr uint32_t kPaceBackoffMin = 60;         /* images at 30 Hz: 2 s */
-constexpr uint32_t kPaceBackoffMax = 900;        /* 30 s */
 uint64_t g_pace_target = 0;      /* ticks of the current slot */
-uint64_t g_pace_interval_us = 16667;
-double g_pace_work_ema = 0.0;    /* whole image, for the log */
-double g_pace_est_ema = 0.0;     /* image without its extra logic steps */
-uint64_t g_pace_extra_ticks = 0; /* extra logic steps since the last flip */
-uint32_t g_pace_hold = 0;        /* images before the next try at 60 Hz */
-uint32_t g_pace_backoff = kPaceBackoffMin;
-uint32_t g_pace_probe = 0;       /* images left in a 60 Hz try (0: not trying) */
-uint32_t g_pace_at60 = 0;        /* images since the switch to 60 Hz */
-uint64_t g_pace_sleep_us = 0, g_pace_late = 0, g_pace_switches = 0;
-uint64_t g_pace_tries = 0, g_pace_kept = 0;
-
-static void pace_back_to_30(void)
-{
-    g_pace_interval_us = 33333;
-    g_pace_hold = g_pace_backoff;
-    g_pace_backoff = g_pace_backoff * 2u > kPaceBackoffMax ? kPaceBackoffMax : g_pace_backoff * 2u;
-    g_pace_switches++;
-}
+double g_pace_work_ema = 0.0;    /* work since the previous flip, for the log */
+uint64_t g_pace_sleep_us = 0, g_pace_late = 0;
 
 void pace_before_flip(void)
 {
     const uint64_t now = lp_ticks();
     if (g_flip_end) {
         const double work = (double)lp_us(now - g_flip_end);
-        const double extra = (double)lp_us(g_pace_extra_ticks);
-        const double est = work > extra ? work - extra : 0.0;
         g_pace_work_ema = g_pace_work_ema == 0.0 ? work : g_pace_work_ema * 0.9 + work * 0.1;
-        g_pace_est_ema = g_pace_est_ema == 0.0 ? est : g_pace_est_ema * 0.9 + est * 0.1;
-        /* Debug menu FRAME CAP: 30 holds 30 Hz, OFF holds the 60 Hz grid and
-         * never drops to 30 (late images are shown at once, so the rate varies
-         * between 30 and 60; at least one logic step runs per image, so the
-         * grid stays as the upper bound). 60 is the automatic choice below. */
-        const int cap = switch_debug_frame_cap ? switch_debug_frame_cap() : 60;
-        if (cap == 30 || cap == 0) {
-            const uint64_t want = cap == 30 ? 33333u : 16667u;
-            if (g_pace_interval_us != want) { g_pace_interval_us = want; g_pace_switches++; }
-            g_pace_probe = 0;
-            g_pace_hold = 0;
-        } else if (g_pace_interval_us == 16667) {
-            g_pace_at60++;
-            if (g_pace_probe) {
-                if (--g_pace_probe == 0) {
-                    if (g_pace_est_ema <= kPaceDownUs) {         /* the try held */
-                        g_pace_kept++;
-                        g_pace_backoff = kPaceBackoffMin;
-                    } else {
-                        pace_back_to_30();                       /* wait longer next time */
-                    }
-                }
-            } else if (g_pace_est_ema > kPaceDownUs) {
-                /* Held a while: the scene got heavier, start over at the
-                 * shortest wait. Otherwise keep backing off. */
-                if (g_pace_at60 > 600u) g_pace_backoff = kPaceBackoffMin;
-                pace_back_to_30();
-            }
+    }
+    const int cap = switch_debug_frame_cap ? switch_debug_frame_cap() : 60;
+    if (cap == 0) {
+        g_pace_target = 0;
+    } else {
+        const uint64_t interval_us = cap == 30 ? 33333u : 16667u;
+        const uint64_t interval = interval_us * 19u + interval_us / 5u;   /* us -> 19.2 MHz ticks */
+        const uint64_t target = g_pace_target + interval;
+        if (!g_pace_target || now > target + interval) {   /* start, or far behind (load, stall) */
+            if (g_pace_target) g_pace_late++;
+            g_pace_target = now;
         } else {
-            if (g_pace_hold) g_pace_hold--;
-            if (!g_pace_hold && g_pace_est_ema < kPaceProbeUs) {
-                g_pace_interval_us = 16667;
-                g_pace_probe = kPaceProbeFrames;
-                g_pace_at60 = 0;
-                g_pace_tries++;
-                g_pace_switches++;
+            if (now < target) {
+                const uint64_t us = lp_us(target - now);
+                g_pace_sleep_us += us;
+#ifdef __SWITCH__
+                svcSleepThread((int64_t)us * 1000);
+#endif
+            } else {
+                g_pace_late++;
             }
+            g_pace_target = target;
         }
     }
-    g_pace_extra_ticks = 0;
-    const uint64_t interval = g_pace_interval_us * 19u + g_pace_interval_us / 5u;   /* us -> 19.2 MHz ticks */
-    if (!g_pace_target) { g_pace_target = now; return; }
-    uint64_t target = g_pace_target + interval;
-    if (now > target + interval) {          /* far behind (load, stall): restart */
-        g_pace_late++;
-        g_pace_target = now;
-        return;
-    }
-    if (now < target) {
-        const uint64_t us = lp_us(target - now);
-        g_pace_sleep_us += us;
-#ifdef __SWITCH__
-        svcSleepThread((int64_t)us * 1000);
-#endif
-    } else {
-        g_pace_late++;
-    }
-    g_pace_target = target;
 
     static uint32_t n = 0;
     if (++n % 150u == 0 && g_log) {
-        fprintf(g_log, "  pace interval_us=%llu work_ema_us=%.0f sleep_us/frame=%.0f late=%llu/150"
-                       " est60_ema_us=%.0f switches=%llu tries=%llu kept=%llu\n",
-                (unsigned long long)g_pace_interval_us, g_pace_work_ema,
-                (double)g_pace_sleep_us / 150.0, (unsigned long long)g_pace_late,
-                g_pace_est_ema, (unsigned long long)g_pace_switches,
-                (unsigned long long)g_pace_tries, (unsigned long long)g_pace_kept);
+        fprintf(g_log, "  pace cap=%d work_ema_us=%.0f sleep_us/frame=%.0f late=%llu/150\n",
+                cap, g_pace_work_ema, (double)g_pace_sleep_us / 150.0,
+                (unsigned long long)g_pace_late);
         /* End-of-frame wait 0x002909C0 (dbz3_native_math.cpp): ms per image
          * in total, before the FIFO reached the user command, and after it. */
         fprintf(g_log, "  fwait waits=%llu ms/frame=%.2f fifo=%.2f deliver=%.2f max_us=%llu\n",
@@ -519,140 +361,12 @@ void pace_before_flip(void)
         g_fw_waits = g_fw_wait_ticks = g_fw_fifo_ticks = g_fw_deliver_ticks = g_fw_max_ticks = 0;
         g_pace_sleep_us = 0;
         g_pace_late = 0;
-        g_pace_switches = 0;
-        g_pace_tries = g_pace_kept = 0;
     }
 }
 
-int logic_steps_due(void)
-{
-    const uint64_t now = lp_ticks();
-    if (!g_step_last) { g_step_last = now; return 1; }
-    g_step_acc += lp_us(now - g_step_last);
-    g_step_last = now;
-    int steps = (int)(g_step_acc / kStepUs);
-    if (steps < 1) steps = 1;
-    if (steps > kMaxSteps) steps = kMaxSteps;
-    const uint64_t used = (uint64_t)steps * kStepUs;
-    g_step_acc = g_step_acc > used ? g_step_acc - used : 0;
-    cap_step_acc();   /* no spiral after a long stall */
-    return steps;
-}
-
-/* Steps that were due but not run: owed to the next passes. */
-void logic_steps_defer(int steps)
-{
-    g_step_acc += (uint64_t)steps * kStepUs;
-    cap_step_acc();
-}
-
-/* Gate for the extra logic steps (run25 crash: end of a match, the async
- * loader func_00014AF8 read a freed object). Logic that starts a scene change
- * or a load must not run twice in one frame, so no extra step while
- *   - the loader has requests pending (count at 0x4765E4), or
- *   - the task list changed during the regular pass (tasks created/killed). */
-constexpr uint32_t kLoaderPending = 0x004765E4u;
-constexpr uint32_t kTaskListHead = 0x0047BCA0u;   /* 0x47BC78 + 0x28 */
+/* Task list: head at 0x47BC78 + 0x28, sentinel 0x47BCB8, next = task + 0x28. */
+constexpr uint32_t kTaskListHead = 0x0047BCA0u;
 constexpr uint32_t kTaskListEnd = 0x0047BCB8u;
-
-uint32_t loader_pending(void) { return vm_read32(kLoaderPending); }
-
-/*
- * Heap check (run25/run26: logic60 crashed in the title allocator
- * func_0001D294 walking its free list into 0x3F800000, a float 1.0 written
- * over a link). The allocator (init at 0x1D090):
- *   *(0x40C820) first block, *(0x40C824) last block (tail sentinel)
- *   block: +0 size, +0x14 / +0x18 link records, +0x1C 0xD2ACD2AC
- *   list A (alloc walk): b = first; b = *(*(b + 0x18) + 0xC) until 0
- *   list B:              b = *(last + 8); b = *(*(b + 0x14) + 8) until 0
- * Every link must stay inside [first, last]. Checked after every task (both
- * passes) and around the loop helpers; the first failure is logged with the
- * task that just ran.
- */
-constexpr uint32_t kHeapFirst = 0x0040C820u;
-constexpr uint32_t kHeapLast = 0x0040C824u;
-constexpr int kHeapWalkMax = 200000;
-
-int g_heap_bad_logged = 0;
-uint64_t g_heap_checks = 0;
-const char* g_heap_last_ok = "start";
-uint32_t g_heap_last_ok_fn = 0;
-
-inline int heap_in(uint32_t p, uint32_t lo, uint32_t hi) { return p >= lo && p <= hi && !(p & 3u); }
-
-/* 0 = fine; otherwise fills the failing link. */
-int heap_walk(uint32_t* bad_node, uint32_t* bad_val, int* which)
-{
-    const uint32_t lo = vm_read32(kHeapFirst), hi = vm_read32(kHeapLast);
-    if (!lo || !hi || hi < lo) return 0;          /* not set up yet */
-    uint32_t b = lo;
-    for (int n = 0; b != 0 && n < kHeapWalkMax; ++n) {
-        if (!heap_in(b, lo, hi)) { *which = 1; *bad_node = 0; *bad_val = b; return 1; }
-        const uint32_t link = vm_read32(b + 0x18u);
-        if (!heap_in(link, lo, hi + 0x20u)) { *which = 2; *bad_node = b; *bad_val = link; return 1; }
-        const uint32_t next = vm_read32(link + 0xCu);
-        if (next != 0 && !heap_in(next, lo, hi)) { *which = 3; *bad_node = link; *bad_val = next; return 1; }
-        b = next;
-    }
-    b = vm_read32(hi + 8u);
-    for (int n = 0; b != 0 && n < kHeapWalkMax; ++n) {
-        if (!heap_in(b, lo, hi)) { *which = 4; *bad_node = 0; *bad_val = b; return 1; }
-        const uint32_t link = vm_read32(b + 0x14u);
-        if (link == 0) break;
-        if (!heap_in(link, lo, hi + 0x20u)) { *which = 5; *bad_node = b; *bad_val = link; return 1; }
-        const uint32_t next = vm_read32(link + 8u);
-        if (next != 0 && !heap_in(next, lo, hi)) { *which = 6; *bad_node = link; *bad_val = next; return 1; }
-        b = next;
-    }
-    return 0;
-}
-
-void heap_check(const char* where, uint32_t fn, uint32_t task, int step)
-{
-#ifndef PORT_DBZ3_LOOP_METRICS
-    (void)where; (void)fn; (void)task; (void)step;
-    return;
-#else
-    if (!ps3_diag_enabled) return;     /* full heap walk: diagnostics only */
-    g_heap_checks++;
-    if (g_heap_bad_logged >= 3) return;
-    uint32_t node = 0, val = 0;
-    int which = 0;
-    if (!heap_walk(&node, &val, &which)) {
-        g_heap_last_ok = where;
-        g_heap_last_ok_fn = fn;
-        return;
-    }
-    if (!g_log) g_log = fopen("sdmc:/switch/dbz-budokai-3-switch/t26-loop-prof.log", "w");
-    if (!g_log) return;
-    fprintf(g_log, "HEAP_BAD #%d after %s fn=0x%08X task=0x%08X step=%d (last ok: %s fn=0x%08X)"
-                   " link_kind=%d node=0x%08X value=0x%08X heap=0x%08X..0x%08X checks=%llu\n",
-            g_heap_bad_logged + 1, where, fn, task, step, g_heap_last_ok, g_heap_last_ok_fn,
-            which, node, val, vm_read32(kHeapFirst), vm_read32(kHeapLast),
-            (unsigned long long)g_heap_checks);
-    if (node) {
-        const uint32_t base = (node & ~15u) - 0x40u;
-        for (uint32_t a = base; a < base + 0xA0u; a += 16u)
-            fprintf(g_log, "  %08X: %08X %08X %08X %08X\n", a, vm_read32(a), vm_read32(a + 4u),
-                    vm_read32(a + 8u), vm_read32(a + 12u));
-    }
-    if (val >= 0x00010000u) dbz3_heap_trace_dump(g_log, node ? node : val);
-    fflush(g_log);
-    g_heap_bad_logged++;
-#endif
-}
-
-uint64_t task_list_sig(void)
-{
-    uint64_t h = 1469598103934665603ull;
-    uint32_t task = vm_read32(kTaskListHead);
-    for (int guard = 0; task != kTaskListEnd && task != 0 && guard < 4096; ++guard) {
-        h = (h ^ task) * 1099511628211ull;
-        h = (h ^ vm_read32(task + 0x1Cu)) * 1099511628211ull;
-        task = vm_read32(task + 0x28u);
-    }
-    return h;
-}
 
 #ifdef PORT_DBZ3_CRASH_TRAIL
 /* Crash trail: hand the sorted set of task functions to dbz3_crash_trail.cpp
@@ -689,7 +403,6 @@ void trail_scan_tasks(void)
 void record_task(uint32_t fn, uint32_t task, uint32_t order, uint64_t us,
                  uint32_t gcm_bytes)
 {
-    classify(fn, gcm_bytes != 0);
 #ifndef PORT_DBZ3_LOOP_METRICS
     (void)task; (void)order; (void)us;
     return;
@@ -704,23 +417,6 @@ void record_task(uint32_t fn, uint32_t task, uint32_t order, uint64_t us,
         t.us += us;
         if (us > t.max_us) t.max_us = us;
         if (gcm_bytes) { t.gcm_runs++; t.gcm_bytes += gcm_bytes; }
-        return;
-    }
-#endif
-}
-
-void record_extra_task(uint32_t fn, uint64_t us)
-{
-#ifndef PORT_DBZ3_LOOP_METRICS
-    (void)fn; (void)us;
-    return;
-#else
-    for (int i = 0; i < kMaxTasks; ++i) {
-        TaskStat& t = g_w.tasks[i];
-        if (t.fn != fn && t.fn != 0) continue;
-        t.fn = fn;
-        t.extra_runs++;
-        t.extra_us += us;
         return;
     }
 #endif
@@ -745,8 +441,7 @@ extern "C" void dbz3_level30790_end(uint64_t start)
  * address before each call); the same functions called from elsewhere -- for
  * example from inside the scene call -- run untouched. */
 /* T43 input diagnostic: the title's pad records (0x47A400..0x47A900, written
- * by func_00024588/func_00023CD0) after every pad poll, regular pass (1) and
- * extra logic step (2). One line per poll that changed something, with the
+ * by func_00024588/func_00023CD0) after every pad poll. One line per poll that changed something, with the
  * changed words, to t30-padgame.log (up to 6000 lines). Matched against the
  * host presses in t21-input.log it shows where a press stops. */
 constexpr uint32_t kPadRecBase = 0x0047A400u, kPadRecWords = 0x500u / 4u;
@@ -822,12 +517,7 @@ LOOP_WRAP(000287F4, S_287F4, 0x0015A284u, NOTHING, NOTHING)
 LOOP_WRAP(00015AB8, S_15AB8, 0x0015A290u, NOTHING, NOTHING)
 LOOP_WRAP(00015C54, S_15C54, 0x0015A298u, NOTHING, NOTHING)
 LOOP_WRAP(0002E9A4, S_2E9A4, 0x0015A2A4u, NOTHING, NOTHING)
-#ifdef PORT_DBZ3_LOGIC60
-#define PACE_PRE pace_before_flip()
-#else
-#define PACE_PRE NOTHING
-#endif
-LOOP_WRAP(000487FC, S_487FC, 0x0015A2BCu, PACE_PRE, g_flip_end = lp_ticks())
+LOOP_WRAP(000487FC, S_487FC, 0x0015A2BCu, pace_before_flip(), g_flip_end = lp_ticks())
 
 /*
  * func_00028FD8: the title's task scheduler, ~30 ms of every fight frame.
@@ -841,409 +531,6 @@ LOOP_WRAP(000487FC, S_487FC, 0x0015A2BCu, PACE_PRE, g_flip_end = lp_ticks())
  */
 extern "C" void ps3_indirect_call(ppu_context* ctx);
 
-/*
- * T6.2 logic at 60 Hz: the title steps its logic once per scheduler pass and
- * was made for 60 passes/s, so at ~30 FPS it ran at half speed. After the
- * regular pass, for every further 1/60 s of real time owed (logic_steps_due),
- * re-read the pad (func_00024588, the same per-frame poll main does, so a
- * press is not seen twice) and run the logic tasks again: those whose function
- * has never written GCM commands. Draw tasks run once per drawn frame.
- */
-/* Logic tasks that must not run twice per drawn frame.
- *   0x000D1490  run27/run28: in the extra pass the heap was always fine right
- *               after it and broken at the next check, whichever task came
- *               next (0x946E8, then 0x97F58), at the same block 0x41120520
- *               (1.0f vectors over a free-list link -> crash in the allocator
- *               func_0001D294). It calls no import: it most likely queues
- *               work another processor writes back asynchronously, into a
- *               per-frame buffer already freed by the time of the extra pass.
- *               (0x946E8, blamed first, was only the next task checked.) */
-/* run29: excluding 0x000D1490 did not help (corruption then showed after
- * 0x946E8 again) and made animations stutter, so it runs twice again; the
- * allocator trace (dbz3_heap_trace.cpp) is to find the buffer's owner. */
-/*   0x001D16C8  DU UI (3 objects per pass): no GCM writes, but it queues 2D
- *               sprites (0x0005C768/0x0005C870) that draw task 0x001D1648
- *               draws once per frame. Run twice, the queue holds the Dragon
- *               Ball bar twice and the next frame shows a second, offset bar
- *               (run157: a ghost after every multi-step pass; run158: none
- *               with this task skipped in the extra steps).
- *   0x001A2BC8  Dialog dispatcher and save monitor (object *(0x470F50)).
- *   0x001A3090  0x1A3090 sets the result (state at +0x58: 4 saved, 5, 3)
- *               and hands back to 0x1A2BC8, which sets it to 0 on every run.
- *               The save screen 0x14B190 reads it, but draws, so it runs once
- *               per image: when an extra step ran 0x1A2BC8 first, the result
- *               was lost and the prompt waited forever without a cursor
- *               (run190, run192). Run only in normal steps, the result stays
- *               until the screen reads it, whatever the task order. */
-constexpr uint32_t kNoRepeat[] = { 0x001D16C8u, 0x001A2BC8u, 0x001A3090u };
-
-int no_repeat(uint32_t fn)
-{
-    for (uint32_t f : kNoRepeat)
-        if (f == fn) return 1;
-    return 0;
-}
-
-constexpr uint32_t kTaskListBase = 0x0047BC78u;   /* head at +0x28 */
-constexpr uint32_t kTaskSentinel = 0x0047BCB8u;
-
-/* Returns 0 when it stopped early or changed the task list (no more steps
- * this frame). */
-extern "C" uint32_t ppu_hle_inject_base;   /* vm.h: GCM control at +0x2000 */
-
-/* T44: draw tasks that also hold game logic, run again in the extra step with
- * their GCM output thrown away (the title's write pointer is put back).
- *   0x001DBC58  Dragon Universe (map, menus, its character select): one task
- *               that updates and draws, ~17 ms; once per drawn frame it ran
- *               at half speed at 30 FPS, menus included.
- * The repeat is skipped when the ring has less than kRdRoom bytes left
- * before `end`: the run must not wrap. If the run moves `put` (it flushes),
- * its commands are already with the RSX and cannot be discarded; disable
- * further repeats for this process. The same applies if the context moves
- * or wraps. sdmc:/switch/dbz-budokai-3-switch/repeat-draw-off disables it. */
-constexpr uint32_t kRepeatDraw[] = { 0x001DBC58u };
-constexpr uint32_t kRdRoom = 0x60000u;
-bool g_repeat_draw_unsafe = false;
-
-/* Logic60 bisect (debug menu EXTRA REPEAT): draw tasks run once per image, so
- * whatever they animate falls one step behind at every extra logic step
- * (poses out of sync, FRAME CAP 30 shows it within seconds). The row repeats
- * every draw task, or one of them, in the extra steps like kRepeatDraw, to
- * find the task that holds animation. The row holds 0 (off), 1 (all draw
- * tasks) or a task function; LEFT/RIGHT step through the draw tasks seen in
- * the last kActivePasses scheduler passes, by address. */
-constexpr int kMaxCands = 256;
-constexpr uint64_t kActivePasses = 120;   /* ~2 s at 60 passes/s */
-uint32_t g_cand_fn[kMaxCands];
-uint64_t g_cand_seen[kMaxCands];
-bool g_cand_unsafe[kMaxCands];
-int g_cand_n = 0;
-uint64_t g_bisect_pass = 0;               /* scheduler passes, never reset */
-
-int cand_index(uint32_t fn)
-{
-    for (int i = 0; i < g_cand_n; ++i)
-        if (g_cand_fn[i] == fn) return i;
-    return -1;
-}
-
-void note_draw_task(uint32_t fn)
-{
-    for (uint32_t f : kRepeatDraw)
-        if (f == fn) return;
-    int i = cand_index(fn);
-    if (i < 0) {
-        if (g_cand_n == kMaxCands) return;
-        i = g_cand_n++;
-        g_cand_fn[i] = fn;
-    }
-    g_cand_seen[i] = g_bisect_pass;
-}
-
-uint32_t bisect_mode(void)
-{
-    return switch_debug_extra_repeat ? (uint32_t)switch_debug_extra_repeat() : 0u;
-}
-
-/* The candidate this extra step repeats because of the menu, or -1. */
-int bisect_pick(uint32_t fn)
-{
-    const uint32_t mode = bisect_mode();
-    if (mode == 0) return -1;
-    const int i = cand_index(fn);
-    if (i < 0 || g_cand_unsafe[i]) return -1;
-    return (mode == 1 || mode == fn) ? i : -1;
-}
-
-/* Draw tasks seen in the last kActivePasses passes, sorted by address. */
-int active_draw_tasks(uint32_t* out)
-{
-    int n = 0;
-    for (int i = 0; i < g_cand_n; ++i) {
-        if (g_bisect_pass - g_cand_seen[i] > kActivePasses) continue;
-        int j = n++;
-        while (j > 0 && out[j - 1] > g_cand_fn[i]) { out[j] = out[j - 1]; --j; }
-        out[j] = g_cand_fn[i];
-    }
-    return n;
-}
-
-#ifdef PORT_DBZ3_CRASH_TRAIL
-extern "C" void dbz3_trail_event(const char* fmt, ...);
-/* Object-list probe (read only). Task 0x0006FDF8 draws every object of the
- * list at 0x00492560 through func_000651C0: head at +0x24, next at obj+0x24,
- * sentinel 0x00492610; an object is drawn when its handler OPD (obj+0x14) is
- * set and (obj+0x20 & 0x880F) == 0. Repeating that task keeps poses in sync
- * (run165), so one handler advances animation while it draws. Logs the
- * handler functions and how many objects use each, drawn and skipped, when
- * that set changes (at most twice a second). */
-void probe_object_list(void)
-{
-    constexpr uint32_t kList = 0x00492560u, kSentinel = 0x00492610u;
-    constexpr int kMax = 24;
-    uint32_t fn[kMax];
-    uint16_t on[kMax], off[kMax];
-    int n = 0, objs = 0;
-    uint32_t obj = vm_read32(kList + 0x24u);
-    for (int guard = 0; obj != kSentinel && obj != 0 && guard < 1024; ++guard, ++objs) {
-        const uint32_t opd = vm_read32(obj + 0x14u);
-        const uint32_t f = opd ? vm_read32(opd) : 0u;
-        const bool drawn = opd != 0 && (vm_read32(obj + 0x20u) & 0x880Fu) == 0;
-        int i = 0;
-        while (i < n && fn[i] != f) ++i;
-        if (i == n) {
-            if (n == kMax) { obj = vm_read32(obj + 0x24u); continue; }
-            fn[n] = f; on[n] = off[n] = 0; ++n;
-        }
-        if (drawn) ++on[i]; else ++off[i];
-        obj = vm_read32(obj + 0x24u);
-    }
-    uint64_t h = 1469598103934665603ull;
-    for (int i = 0; i < n; ++i)
-        h = (((h ^ fn[i]) * 1099511628211ull) ^ ((uint32_t)on[i] << 16 | off[i])) * 1099511628211ull;
-    static uint64_t last_sig = 0, last_tick = 0;
-    const uint64_t now = lp_ticks();
-    if (h == last_sig || lp_us(now - last_tick) < 500000u) return;
-    last_sig = h;
-    last_tick = now;
-    /* fn:drawn/skipped, split over events of the trail's line size */
-    char text[170];
-    int len = snprintf(text, sizeof text, "objs(%d):", objs);
-    for (int i = 0; i < n; ++i) {
-        char item[24];
-        const int k = snprintf(item, sizeof item, " %06X:%u/%u", fn[i], on[i], off[i]);
-        if (len + k >= (int)sizeof text) {
-            dbz3_trail_event("%s", text);
-            len = snprintf(text, sizeof text, "objs+:");
-        }
-        memcpy(text + len, item, (size_t)k + 1);
-        len += k;
-    }
-    dbz3_trail_event("%s", text);
-}
-#endif
-
-/* For the menu row (switch_debug.h): the value after cur in the sequence
- * off, all, active draw tasks; and where fn stands in that list. */
-extern "C" uint32_t dbz3_bisect_next(uint32_t cur, int delta)
-{
-    uint32_t seq[2 + kMaxCands];
-    seq[0] = 0;
-    seq[1] = 1;
-    const int n = 2 + active_draw_tasks(seq + 2);
-    int pos = cur > 1 ? 1 : (int)cur;     /* a task gone from the scene: from ALL */
-    for (int i = 0; i < n; ++i)
-        if (seq[i] == cur) pos = i;
-    return seq[((pos + delta) % n + n) % n];
-}
-
-extern "C" int dbz3_bisect_info(uint32_t fn, int* pos, int* count)
-{
-    uint32_t list[kMaxCands];
-    const int n = active_draw_tasks(list);
-    *count = n;
-    *pos = 0;
-    for (int i = 0; i < n; ++i)
-        if (list[i] == fn) *pos = i + 1;
-    const int c = cand_index(fn);
-    return c >= 0 && g_cand_unsafe[c];
-}
-
-#ifdef PORT_DBZ3_CRASH_TRAIL
-extern "C" void dbz3_trail_event(const char* fmt, ...);
-#endif
-
-void bisect_log(const char* text)
-{
-    fprintf(stderr, "[bisect] %s\n", text);
-#ifdef PORT_DBZ3_CRASH_TRAIL
-    dbz3_trail_event("%s", text);
-#endif
-}
-
-/* Once per scheduler pass: count it, log a change of the row. */
-void bisect_note_mode(void)
-{
-    ++g_bisect_pass;
-    static uint32_t last = 0;
-    const uint32_t mode = bisect_mode();
-    if (mode == last) return;
-    last = mode;
-    char text[96];
-    uint32_t list[kMaxCands];
-    const int active = active_draw_tasks(list);
-    if (mode == 0) snprintf(text, sizeof text, "extra-repeat: off");
-    else if (mode == 1) snprintf(text, sizeof text, "extra-repeat: all draw tasks (%d active)", active);
-    else snprintf(text, sizeof text, "extra-repeat: task %06X (%d active)", mode, active);
-    bisect_log(text);
-}
-
-/* A repeated task flushed or wrapped the command ring: stop repeating it. */
-void bisect_stopped(int pick)
-{
-    char text[64];
-    snprintf(text, sizeof text, "extra-repeat: task %06X stopped (ring)", g_cand_fn[pick]);
-    bisect_log(text);
-}
-
-/* run08: entry -> loc_001DE4F4 takes about 0.45 ms and writes zero GCM bytes.
- * The rest takes 15-22 ms and emits all observed GCM output. Keep the update
- * part on extra 60 Hz steps; render the common tail on regular passes only.
- * The SD marker restores the original full extra pass for A/B comparisons. */
-int du_update_only_enabled(void)
-{
-    static int enabled = -1;
-    if (enabled < 0) {
-        FILE* f = fopen("sdmc:/switch/dbz-budokai-3-switch/du-full-extra", "r");
-        enabled = f ? 0 : 1;
-        if (f) fclose(f);
-    }
-    return enabled;
-}
-
-extern "C" int dbz3_du_skip_render(void)
-{
-    if (g_dbz3_cur_pass != 2 || !du_update_only_enabled()) return 0;
-    g_w.du_render_skipped++;
-    return 1;
-}
-
-int repeat_draw(uint32_t fn)
-{
-    static int off = -1;
-    if (off < 0) {
-        FILE* f = fopen("sdmc:/switch/dbz-budokai-3-switch/repeat-draw-off", "r");
-        off = f ? 1 : 0;
-        if (f) fclose(f);
-    }
-    if (off || g_repeat_draw_unsafe) return 0;
-    for (uint32_t f : kRepeatDraw)
-        if (f == fn) return 1;
-    return 0;
-}
-
-uint32_t gcm_put(void) { return vm_read32(ppu_hle_inject_base + 0x2000u); }
-
-int extra_logic_step(ppu_context* ctx)
-{
-    const uint64_t pace_t0 = lp_ticks();
-    const uint64_t t0 = metric_ticks();
-    const uint64_t sig0 =
-#ifdef PORT_DBZ3_LOOP_METRICS
-        task_list_sig();
-#else
-        0;
-#endif
-    int ok = 1;
-    const uint64_t save_r1 = ctx->gpr[1], save_r2 = ctx->gpr[2];
-    const uint64_t save_r28 = ctx->gpr[28], save_r29 = ctx->gpr[29];
-    const uint64_t save_r30 = ctx->gpr[30], save_r31 = ctx->gpr[31];
-    const uint64_t save_lr = ctx->lr;
-
-    /* Same frame layout as func_00028FD8's: back chain, TOC save at +0x28. */
-    vm_write64(ctx->gpr[1] + -0xA0, ctx->gpr[1]); ctx->gpr[1] += -0xA0;
-    vm_write64(ctx->gpr[1] + 0x28, ctx->gpr[2]);
-
-    /* Read live input on every logic step. Replaying a frozen snapshot caused
-     * missed/delayed controls on Switch; the pad-repoll trial resolved them.
-     * This is now unconditional and needs no SD marker. The logic60 scheduler
-     * still controls timing, while cellPad retains its normal report policy. */
-    ctx->lr = 0x0015A25Cu;            /* as from main; the wrapper times it */
-    real_func_00024588(ctx); DRAIN_TRAMPOLINE(ctx);
-    pad_rec_trace(2);
-    heap_check("extra pad poll", 0x00024588u, 0, 2);
-    ctx->gpr[2] = vm_read64(ctx->gpr[1] + 0x28);
-
-    uint64_t ran = 0;
-    ctx->gpr[29] = kTaskListBase;
-    ctx->gpr[31] = kTaskSentinel;
-    uint32_t task = vm_read32(kTaskListBase + 0x28u);
-    for (int guard = 0; task != kTaskSentinel && task != 0 && guard < 4096; ++guard) {
-        const uint32_t opd = vm_read32(task + 0x1Cu);
-        if (opd != 0 && opd != 0xFFFFFFFFu) {
-            const uint32_t fn = vm_read32(opd);
-            const int cls = task_class(fn);
-            const int pick = cls == CLS_DRAW ? bisect_pick(fn) : -1;
-            int rd = cls == CLS_DRAW && (repeat_draw(fn) || pick >= 0);
-            uint32_t rd_begin0 = 0, rd_end0 = 0;
-            uint32_t rd_cur0 = 0, rd_put0 = 0;
-            if (rd) {
-                rd_begin0 = vm_read32(kTitleGcmCtx);
-                rd_end0 = vm_read32(kTitleGcmCtx + 4u);
-                rd_cur0 = gcm_current();
-                /* The DU task skips its render part in the extra step; any
-                 * other repeated task draws in full and needs the room. */
-                const bool full = pick >= 0 || !du_update_only_enabled();
-                if (rd_begin0 > rd_cur0 || rd_end0 < rd_cur0 ||
-                    (full && rd_end0 - rd_cur0 < kRdRoom)) {
-                    g_w.rd_noroom++;
-                    task = vm_read32(task + 0x28u);
-                    continue;
-                }
-                rd_put0 = gcm_put();
-            }
-            if ((cls == CLS_LOGIC && !no_repeat(fn)) || rd) {
-                ctx->gpr[30] = task;
-                ctx->gpr[3] = task;
-                ctx->gpr[4] = opd;
-                ctx->gpr[5] = fn;
-                ctx->ctr = fn;
-                ctx->gpr[2] = vm_read32(opd + 4u);
-                ctx->lr = 0x00029050u;
-                g_dbz3_cur_task_fn = fn; g_dbz3_cur_pass = 2;
-                const uint64_t extra_task_t0 = metric_ticks();
-                ps3_indirect_call(ctx); DRAIN_TRAMPOLINE(ctx);
-                record_extra_task(fn, lp_us(metric_ticks() - extra_task_t0));
-                g_dbz3_cur_task_fn = 0; g_dbz3_cur_pass = 0;
-                ctx->gpr[2] = vm_read64(ctx->gpr[1] + 0x28);
-                ++ran;
-                if (rd) {
-                    g_w.rd_runs++;
-                    const uint32_t cur1 = gcm_current();
-                    /* A bisect repeat that flushed or wrapped stops only
-                     * itself; the DU repeat keeps its old rule. */
-                    bool& unsafe = pick >= 0 ? g_cand_unsafe[pick] : g_repeat_draw_unsafe;
-                    const bool was_unsafe = unsafe;
-                    if (gcm_put() != rd_put0) {
-                        g_w.rd_flushed++;
-                        unsafe = true;
-                    } else if (vm_read32(kTitleGcmCtx) != rd_begin0 ||
-                               vm_read32(kTitleGcmCtx + 4u) != rd_end0 ||
-                               cur1 < rd_cur0 || cur1 > rd_end0) {
-                        g_w.rd_wrapped++;
-                        unsafe = true;
-                    } else {
-                        vm_write32(kTitleGcmCtx + 8u, rd_cur0);
-                        g_w.rd_rolled++;
-                        g_w.rd_kb += (cur1 - rd_cur0) / 1024u;
-                    }
-                    if (pick >= 0 && unsafe && !was_unsafe) bisect_stopped(pick);
-                }
-                heap_check("extra task", fn, task, 2);
-                if (loader_pending() != 0) {       /* this step started a load */
-                    g_w.aborted++;
-                    ok = 0;
-                    break;
-                }
-            }
-        }
-        task = vm_read32(task + 0x28u);
-    }
-    (void)sig0;   /* G1: a changed task list no longer ends the frame's extra steps */
-
-    ctx->gpr[1] = save_r1; ctx->gpr[2] = save_r2;
-    ctx->gpr[28] = save_r28; ctx->gpr[29] = save_r29;
-    ctx->gpr[30] = save_r30; ctx->gpr[31] = save_r31;
-    ctx->lr = save_lr;
-
-    g_pace_extra_ticks += lp_ticks() - pace_t0;
-    const uint64_t us = lp_us(metric_ticks() - t0);
-    g_w.extra_us += us;
-    if (us > g_w.extra_max_us) g_w.extra_max_us = us;
-    g_w.extra_tasks += ran;
-    return ok;
-}
-
 extern "C" void real_func_00028FD8(ppu_context* ctx)
     __asm__("__real__Z13func_00028FD8P11ppu_context");
 extern "C" void wrap_func_00028FD8(ppu_context* ctx)
@@ -1254,10 +541,6 @@ extern "C" void wrap_func_00028FD8(ppu_context* ctx)
     const uint64_t sched_t0 = metric_ticks();
     uint32_t order = 0;
     g_w.task_passes++;
-#ifdef PORT_DBZ3_LOGIC60
-    const uint64_t list_sig0 = task_list_sig();
-    const uint32_t load0 = loader_pending();
-#endif
 
         uint64_t _cs_28 = ctx->gpr[28];
         uint64_t _cs_29 = ctx->gpr[29];
@@ -1297,18 +580,12 @@ loc_00029014:
         vm_write64(ctx->gpr[1] + 0x28, ctx->gpr[2]);
         ctx->ctr = (uint32_t)ctx->gpr[5];
         ctx->gpr[2] = vm_read32(ctx->gpr[4] + 0x4);
-#ifdef PORT_DBZ3_CRASH_TRAIL
-        if (fn == 0x0006FDF8u) probe_object_list();
-#endif
         g_dbz3_cur_task_fn = fn; g_dbz3_cur_pass = 1;
         { ps3_indirect_call(ctx); DRAIN_TRAMPOLINE(ctx); }
         g_dbz3_cur_task_fn = 0; g_dbz3_cur_pass = 0;
         ctx->gpr[2] = vm_read64(ctx->gpr[1] + 0x28);
             const uint64_t t1 = metric_ticks();
             record_task(fn, task, order, lp_us(t1 - t0), gcm_written(g0, gcm_current()));
-#ifdef PORT_DBZ3_LOGIC60
-            if (task_class(fn) == CLS_DRAW) note_draw_task(fn);
-#endif
         }
 loc_00029054:
         order++;
@@ -1374,52 +651,9 @@ loc_0002911C:
         ctx->gpr[31] = _cs_31;
         ctx->gpr[1] = ctx->gpr[1] + (int64_t)(0xA0);
 
-#ifdef PORT_DBZ3_LOGIC60
-    {
-        const int steps = logic_steps_due();
-        int ran = 1;
-        if (steps > 1) {
-            /* G1: no longer deferred when the task list changed this pass.
-             * Cutscenes create and kill tasks almost every frame, so that gate
-             * cost them up to ~10% of their logic steps and the animation fell
-             * behind the (real-time) voice. It was added for the run25/26
-             * crash, whose real cause was the a2d stack underflow, now guarded
-             * (dbz3_heap_trace.cpp). The count is still logged. */
-            if (task_list_sig() != list_sig0) g_w.gated_list++;
-            if (load0 != 0 || loader_pending() != 0) {
-                g_w.gated_load++;
-                g_l60_gated++;
-            } else {
-                while (ran < steps) {
-                    const int ok = extra_logic_step(ctx);
-                    ++ran;
-                    if (!ok) { g_l60_aborted++; break; }
-                }
-            }
-            if (ran < steps) logic_steps_defer(steps - ran);
-        }
-        g_w.steps_hist[ran]++;
-        g_l60_passes++;
-        g_l60_steps += (uint64_t)ran;
-    }
-#else
-    g_w.steps_hist[1]++;
-#endif
 #ifdef PORT_DBZ3_CRASH_TRAIL
     trail_scan_tasks();
     dbz3_tlsf_walk();   /* dbz3_tlsf_guard.cpp: damaged heap headers */
 #endif
-#ifdef PORT_DBZ3_LOGIC60
-    bisect_note_mode();
-#endif
     add(S_28FD8, lp_us(metric_ticks() - sched_t0));
 }
-
-#ifdef PORT_DBZ3_LOGIC60
-/* Crash trail heartbeat: passes, steps, gated, aborted, dropped_us. */
-extern "C" void dbz3_logic60_counters(uint64_t out[5])
-{
-    out[0] = g_l60_passes; out[1] = g_l60_steps; out[2] = g_l60_gated;
-    out[3] = g_l60_aborted; out[4] = g_l60_dropped_us;
-}
-#endif
